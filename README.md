@@ -9,16 +9,22 @@ A Discord bot that allows users to manage their tasks directly from Discord, ori
 - Mark tasks as complete/incomplete
 - Delete tasks
 - Edit task descriptions
-- Set due dates for tasks
+- Set due dates for tasks with automatic reminders
 - Clear completed tasks
 - Detailed view of tasks with embeds
 - Persistent storage of tasks
 - User-specific task management
+- Assign tasks to other users (admin only)
+- Restrict bot to specific channel (admin only)
+- Automatic due date reminders
 
 ## Commands
 
 - `!task add [task]` - Add a new task
+- `!task assign @user [task]` - Assign a task to another user (admin only)
+- `!task setchannel #channel` - Set the channel where the bot operates (admin only)
 - `!task list` - List all your tasks in text format
+- `!task assigned` - List tasks assigned to you by others
 - `!task detailed` - Show detailed view of all tasks with embeds
 - `!task complete [number]` - Mark a task as complete
 - `!task delete [number]` - Delete a task
@@ -37,12 +43,15 @@ A Discord bot that allows users to manage their tasks directly from Discord, ori
    ```
    DISCORD_TOKEN=your_bot_token_here
    ```
-6. Invite your bot to your server with the necessary permissions
+6. Invite your bot to your server with the necessary permissions (make sure to include "Administrator" permission for admin-only commands)
 7. Run the bot: `npm start`
+8. Use `!task setchannel #your-task-channel` to restrict the bot to a specific channel (admin only)
+9. The bot will send due date reminders automatically at midnight each day
 
 ## Storage
 
 Tasks are stored in a `tasks.json` file in the root directory. The bot will automatically create this file if it doesn't exist.
+Configuration settings are stored in `config.json`.
 
 ## Contributing
 
