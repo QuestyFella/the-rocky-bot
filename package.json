@@ -9,13 +9,19 @@
   },
   "dependencies": {
     "discord.js": "^14.0.0",
+    "dotenv": "^16.0.0",
     "fs": "^0.0.1-security",
-    "dotenv": "^16.0.0"
+    "node-cron": "^4.2.1"
   },
   "devDependencies": {
     "nodemon": "^2.0.0"
   },
-  "keywords": ["discord", "bot", "task", "manager"],
+  "keywords": [
+    "discord",
+    "bot",
+    "task",
+    "manager"
+  ],
   "author": "Task Manager Bot",
   "license": "MIT"
 }

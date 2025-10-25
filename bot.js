@@ -1,6 +1,7 @@
 const { Client, GatewayIntentBits, Collection, EmbedBuilder } = require('discord.js');
 require('dotenv').config();
 const fs = require('fs');
+const cron = require('node-cron');
 const TaskStorage = require('./taskStorage');
 
 // Create a new client instance
@@ -8,7 +9,8 @@ const client = new Client({
     intents: [ 
         GatewayIntentBits.Guilds, 
         GatewayIntentBits.GuildMessages, 
-        GatewayIntentBits.MessageContent 
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers
     ] 
 });
 
@@ -36,6 +38,42 @@ client.once('ready', () => {
     
     // Set bot activity
     client.user.setActivity('your tasks | Use /help', { type: 'WATCHING' });
+    
+    // Schedule task reminder check every day at midnight
+    cron.schedule('0 0 * * *', async () => {
+        console.log('Checking for tasks due tomorrow...');
+        
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const tomorrowString = tomorrow.toISOString().split('T')[0]; // Format as YYYY-MM-DD
+        
+        // Find tasks due tomorrow that aren't completed
+        const tasksDueTomorrow = client.tasks.filter(task => {
+            return task.dueDate === tomorrowString && !task.completed;
+        });
+        
+        console.log(`Found ${tasksDueTomorrow.length} tasks due tomorrow`);
+        
+        for (const task of tasksDueTomorrow) {
+            try {
+                // Find the user in the Discord server
+                const user = await client.users.fetch(task.userId);
+                
+                if (user) {
+                    // Attempt to send a direct message to the user
+                    await user.send(`⏰ Reminder: Your task "${task.title}" is due tomorrow!`);
+                    console.log(`Sent reminder to user ${user.username} for task: ${task.title}`);
+                }
+            } catch (error) {
+                console.error(`Could not send reminder to user ID ${task.userId}:`, error);
+            }
+        }
+    }, {
+        scheduled: true,
+        timezone: "America/Toronto" // Set appropriate timezone
+    });
+    
+    console.log('Task reminder scheduler started');
 });
 
 // When a message is received
