@@ -4,6 +4,15 @@ const fs = require('fs');
 const cron = require('node-cron');
 const TaskStorage = require('./taskStorage');
 
+// Load configuration
+let config = { allowedChannelId: null };
+try {
+    const configFile = fs.readFileSync('./config.json', 'utf8');
+    config = JSON.parse(configFile);
+} catch (error) {
+    console.log('No config file found, using default settings');
+}
+
 // Create a new client instance
 const client = new Client({ 
     intents: [ 
@@ -83,6 +92,15 @@ client.on('messageCreate', message => {
     
     // Check if message is a command
     if (message.content.startsWith('!task')) {
+        // Check if the bot is restricted to a specific channel
+        if (config.allowedChannelId && message.channel.id !== config.allowedChannelId) {
+            // Allow the setchannel command to work in any channel
+            const potentialCommand = message.content.slice('!task'.length).trim().split(/ +/)[0].toLowerCase();
+            if (potentialCommand !== 'setchannel') {
+                return; // Ignore commands in unauthorized channels
+            }
+        }
+        
         const args = message.content.slice('!task'.length).trim().split(/ +/);
         const commandName = args.shift().toLowerCase();
         

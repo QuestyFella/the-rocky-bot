@@ -10,7 +10,8 @@ module.exports = {
             .setDescription('Here are the available commands:')
             .addFields(
                 { name: '!task add [task]', value: 'Add a new task' },
-                { name: '!task assign @user [task]', value: 'Assign a task to another user' },
+                { name: '!task assign @user [task]', value: 'Assign a task to another user (Admin only)' },
+                { name: '!task setchannel [#channel]', value: 'Set the channel where the bot operates (Admin only)' },
                 { name: '!task list', value: 'List all your tasks' },
                 { name: '!task assigned', value: 'List tasks assigned to you by others' },
                 { name: '!task detailed', value: 'Show detailed view of all tasks' },
