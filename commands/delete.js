@@ -2,8 +2,8 @@ module.exports = {
     name: 'delete',
     description: 'Delete a task',
     execute(message, args) {
-        // Get user tasks
-        const userTasks = message.client.taskStorage.getUserTasks(message.author.id);
+        // Get user tasks from guild-specific storage
+        const userTasks = message.client.taskStorage.getUserTasks(message.guild.id, message.author.id);
         
         if (!args.length) {
             return message.reply('Please provide a task number to delete!');
@@ -16,19 +16,13 @@ module.exports = {
         
         const taskToDelete = userTasks[taskIndex];
         
-        // Remove the task from the main tasks array
-        const taskIndexInMainArray = message.client.tasks.findIndex(task => task.id === taskToDelete.id);
-        if (taskIndexInMainArray !== -1) {
-            message.client.tasks.splice(taskIndexInMainArray, 1);
-            
-            // Delete the task from storage
-            const success = message.client.taskStorage.deleteTask(taskToDelete.id);
-            
-            if (success) {
-                message.reply(`Deleted task: "${taskToDelete.title}"`);
-            } else {
-                message.reply('Failed to delete task from storage.');
-            }
+        // Delete the task from guild-specific storage
+        const success = message.client.taskStorage.deleteTask(message.guild.id, taskToDelete.id);
+        
+        if (success) {
+            message.reply(`Deleted task: "${taskToDelete.title}"`);
+        } else {
+            message.reply('Failed to delete task from storage.');
         }
     }
 };

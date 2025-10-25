@@ -2,8 +2,9 @@ module.exports = {
     name: 'assigned',
     description: 'List tasks assigned to you by others',
     execute(message, args) {
-        // Get tasks assigned to the user (tasks where they're the userId but not the assignedBy)
-        const assignedTasks = message.client.tasks.filter(task => 
+        // Get tasks assigned to the user from guild-specific storage
+        const allTasks = message.client.taskStorage.getAllTasks(message.guild.id);
+        const assignedTasks = allTasks.filter(task => 
             task.userId === message.author.id && 
             task.assignedBy && 
             task.assignedBy !== message.author.id

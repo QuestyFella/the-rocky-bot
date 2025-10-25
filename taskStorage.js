@@ -2,79 +2,95 @@ const fs = require('fs');
 const path = require('path');
 
 class TaskStorage {
-    constructor(filePath = './tasks.json') {
-        this.filePath = filePath;
-        this.ensureFileExists();
+    constructor(tasksDir = './server-tasks') {
+        this.tasksDir = tasksDir;
+        this.ensureDirectoryExists();
     }
 
-    ensureFileExists() {
-        if (!fs.existsSync(this.filePath)) {
-            fs.writeFileSync(this.filePath, JSON.stringify([]), 'utf8');
+    ensureDirectoryExists() {
+        if (!fs.existsSync(this.tasksDir)) {
+            fs.mkdirSync(this.tasksDir, { recursive: true });
         }
     }
 
-    loadTasks() {
+    getFilePath(guildId) {
+        return path.join(this.tasksDir, `${guildId}.json`);
+    }
+
+    ensureFileExists(guildId) {
+        this.ensureDirectoryExists();
+        const filePath = this.getFilePath(guildId);
+        if (!fs.existsSync(filePath)) {
+            fs.writeFileSync(filePath, JSON.stringify([]), 'utf8');
+        }
+    }
+
+    loadTasks(guildId) {
+        this.ensureFileExists(guildId);
         try {
-            const data = fs.readFileSync(this.filePath, 'utf8');
+            const filePath = this.getFilePath(guildId);
+            const data = fs.readFileSync(filePath, 'utf8');
             return JSON.parse(data);
         } catch (error) {
-            console.error('Error loading tasks:', error);
+            console.error(`Error loading tasks for guild ${guildId}:`, error);
             return [];
         }
     }
 
-    saveTasks(tasks) {
+    saveTasks(guildId, tasks) {
         try {
-            fs.writeFileSync(this.filePath, JSON.stringify(tasks, null, 2), 'utf8');
+            const filePath = this.getFilePath(guildId);
+            fs.writeFileSync(filePath, JSON.stringify(tasks, null, 2), 'utf8');
             return true;
         } catch (error) {
-            console.error('Error saving tasks:', error);
+            console.error(`Error saving tasks for guild ${guildId}:`, error);
             return false;
         }
     }
 
-    addTask(task) {
-        const tasks = this.loadTasks();
+    addTask(guildId, task) {
+        const tasks = this.loadTasks(guildId);
         tasks.push(task);
-        return this.saveTasks(tasks);
+        return this.saveTasks(guildId, tasks);
     }
 
-    updateTask(taskId, updatedTask) {
-        const tasks = this.loadTasks();
+    updateTask(guildId, taskId, updatedTask) {
+        const tasks = this.loadTasks(guildId);
         const index = tasks.findIndex(task => task.id === taskId);
         if (index !== -1) {
             tasks[index] = updatedTask;
-            return this.saveTasks(tasks);
+            return this.saveTasks(guildId, tasks);
         }
         return false;
     }
 
-    deleteTask(taskId) {
-        const tasks = this.loadTasks();
+    deleteTask(guildId, taskId) {
+        const tasks = this.loadTasks(guildId);
         const index = tasks.findIndex(task => task.id === taskId);
         if (index !== -1) {
             tasks.splice(index, 1);
-            return this.saveTasks(tasks);
+            return this.saveTasks(guildId, tasks);
         }
         return false;
     }
 
-    getAllTasks() {
-        return this.loadTasks();
+    getAllTasks(guildId) {
+        return this.loadTasks(guildId);
     }
 
-    getUserTasks(userId) {
-        const allTasks = this.loadTasks();
+    getUserTasks(guildId, userId) {
+        const allTasks = this.loadTasks(guildId);
         return allTasks.filter(task => task.userId === userId);
     }
 
-    getTaskIndex(taskId) {
-        const tasks = this.loadTasks();
+    getTaskIndex(guildId, taskId) {
+        const tasks = this.loadTasks(guildId);
         return tasks.findIndex(task => task.id === taskId);
     }
 
-    clearAllTasks() {
-        return this.saveTasks([]);
+    getRoleTasks(guildId, roleId) {
+        const allTasks = this.loadTasks(guildId);
+        return allTasks.filter(task => task.assignedToRole === roleId);
     }
 }
 

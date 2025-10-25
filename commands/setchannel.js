@@ -26,17 +26,20 @@ module.exports = {
             return message.reply('Please provide a valid channel that exists in this server!');
         }
 
-        // Store the allowed channel ID in the client
-        message.client.allowedChannelId = channelId;
+        // Load and update the guild-specific configuration
+        if (!message.client.serverConfigs[message.guild.id]) {
+            message.client.serverConfigs[message.guild.id] = message.client.loadServerConfig(message.guild.id);
+        }
         
-        // Save to a config file or update storage as needed
-        message.reply(`Bot channel has been set to <#${channelId}>. The bot will only work in this channel now.`);
+        message.client.serverConfigs[message.guild.id].allowedChannelId = channelId;
         
-        // Optionally, save to a config file for persistence across restarts
-        const fs = require('fs');
-        const config = {
-            allowedChannelId: channelId
-        };
-        fs.writeFileSync('./config.json', JSON.stringify(config, null, 2));
+        // Save the configuration to file
+        const success = message.client.saveServerConfig(message.guild.id, message.client.serverConfigs[message.guild.id]);
+        
+        if (success) {
+            message.reply(`Bot channel has been set to <#${channelId}>. The bot will only work in this channel now.`);
+        } else {
+            message.reply('Failed to save configuration.');
+        }
     }
 };
