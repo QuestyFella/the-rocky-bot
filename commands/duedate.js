@@ -15,12 +15,24 @@ module.exports = {
         }
         
         const taskToEdit = userTasks[taskIndex];
-        const dueDate = args.slice(1).join(' ');
+        const dueDateInput = args.slice(1).join(' ');
         
-        // Validate date format (basic check)
-        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-        if (!dateRegex.test(dueDate) && isNaN(Date.parse(dueDate))) {
-            return message.reply('Please provide a valid date format (YYYY-MM-DD or a recognizable date format)');
+        // Parse the date and format it as YYYY-MM-DD
+        let dueDate = null;
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/; // YYYY-MM-DD format
+        
+        if (dateRegex.test(dueDateInput)) {
+            // Already in correct format
+            dueDate = dueDateInput;
+        } else {
+            // Try to parse other date formats
+            const parsedDate = new Date(dueDateInput);
+            if (isNaN(parsedDate.getTime())) {
+                return message.reply('Please provide a valid date format (YYYY-MM-DD or a recognizable date format like "Dec 25, 2023")');
+            }
+            
+            // Format to YYYY-MM-DD
+            dueDate = parsedDate.toISOString().split('T')[0];
         }
         
         // Update the task in the main tasks array
