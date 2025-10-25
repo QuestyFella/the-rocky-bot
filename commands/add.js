@@ -14,12 +14,12 @@ module.exports = {
             dueDate: null,
             completed: false,
             createdAt: new Date().toISOString(),
-            userId: message.author.id // Store the user ID
+            userId: message.author.id, // Store the user ID
+            guildId: message.guild.id // Store guild ID for multi-server
         };
         
-        // Add to in-memory tasks and save to file
-        message.client.tasks.push(newTask);
-        const success = message.client.taskStorage.addTask(newTask);
+        // Save to guild-specific storage
+        const success = message.client.taskStorage.addTask(message.guild.id, newTask);
         
         if (success) {
             message.reply(`Added new task: "${taskTitle}"`);

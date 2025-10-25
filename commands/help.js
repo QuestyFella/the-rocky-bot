@@ -11,6 +11,9 @@ module.exports = {
             .addFields(
                 { name: '!task add [task]', value: 'Add a new task' },
                 { name: '!task assign @user [task]', value: 'Assign a task to another user (Admin only)' },
+                { name: '!task assignrole @role [task]', value: 'Assign a task to all members of a role (Admin only)' },
+                { name: '!task listrole @role', value: 'List tasks assigned to a role (Admin only)' },
+                { name: '!task removerole @role', value: 'Remove all tasks assigned to a role (Admin only)' },
                 { name: '!task setchannel [#channel]', value: 'Set the channel where the bot operates (Admin only)' },
                 { name: '!task list', value: 'List all your tasks' },
                 { name: '!task assigned', value: 'List tasks assigned to you by others' },

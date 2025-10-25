@@ -2,8 +2,8 @@ module.exports = {
     name: 'list',
     description: 'List all tasks',
     execute(message, args) {
-        // Get user tasks from storage
-        const userTasks = message.client.taskStorage.getUserTasks(message.author.id);
+        // Get user tasks from guild-specific storage
+        const userTasks = message.client.taskStorage.getUserTasks(message.guild.id, message.author.id);
         
         if (userTasks.length === 0) {
             return message.reply('No tasks found!');

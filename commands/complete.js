@@ -2,8 +2,8 @@ module.exports = {
     name: 'complete',
     description: 'Complete a task',
     execute(message, args) {
-        // Get user tasks
-        const userTasks = message.client.taskStorage.getUserTasks(message.author.id);
+        // Get user tasks from guild-specific storage
+        const userTasks = message.client.taskStorage.getUserTasks(message.guild.id, message.author.id);
         
         if (!args.length) {
             return message.reply('Please provide a task number to complete!');
@@ -16,19 +16,16 @@ module.exports = {
         
         const taskToComplete = userTasks[taskIndex];
         
-        // Update the task as completed in the main tasks array
-        const taskInMainArray = message.client.tasks.find(task => task.id === taskToComplete.id);
-        if (taskInMainArray) {
-            taskInMainArray.completed = true;
-            
-            // Update the task in storage
-            const success = message.client.taskStorage.updateTask(taskToComplete.id, taskInMainArray);
-            
-            if (success) {
-                message.reply(`Completed task: "${taskToComplete.title}"`);
-            } else {
-                message.reply('Failed to update task in storage.');
-            }
+        // Update the task as completed
+        taskToComplete.completed = true;
+        
+        // Update the task in guild-specific storage
+        const success = message.client.taskStorage.updateTask(message.guild.id, taskToComplete.id, taskToComplete);
+        
+        if (success) {
+            message.reply(`Completed task: "${taskToComplete.title}"`);
+        } else {
+            message.reply('Failed to update task in storage.');
         }
     }
 };

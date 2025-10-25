@@ -15,13 +15,20 @@ A Discord bot that allows users to manage their tasks directly from Discord, ori
 - Persistent storage of tasks
 - User-specific task management
 - Assign tasks to other users (admin only)
+- Assign tasks to all members of a role (admin only)
+- Remove tasks from all members of a role (admin only)
+- List tasks assigned to roles (admin only)
 - Restrict bot to specific channel (admin only)
 - Automatic due date reminders
+- Multi-server support
 
 ## Commands
 
 - `!task add [task]` - Add a new task
 - `!task assign @user [task]` - Assign a task to another user (admin only)
+- `!task assignrole @role [task]` - Assign a task to all members of a role (admin only)
+- `!task listrole @role` - List tasks assigned to a role (admin only)
+- `!task removerole @role` - Remove all tasks assigned to a role (admin only)
 - `!task setchannel #channel` - Set the channel where the bot operates (admin only)
 - `!task list` - List all your tasks in text format
 - `!task assigned` - List tasks assigned to you by others
@@ -50,8 +57,9 @@ A Discord bot that allows users to manage their tasks directly from Discord, ori
 
 ## Storage
 
-Tasks are stored in a `tasks.json` file in the root directory. The bot will automatically create this file if it doesn't exist.
-Configuration settings are stored in `config.json`.
+Tasks are stored in `server-tasks/{serverId}.json` files per server. The bot will create these automatically.
+Configuration settings are stored in `server-configs/{serverId}.json` per server.
+Data files are automatically added to .gitignore.
 
 ## Contributing
 

@@ -33,12 +33,12 @@ module.exports = {
             completed: false,
             createdAt: new Date().toISOString(),
             userId: userMention.id, // Assign to the mentioned user
-            assignedBy: message.author.id // Track who assigned the task
+            assignedBy: message.author.id, // Track who assigned the task
+            guildId: message.guild.id // Store guild ID for multi-server
         };
         
-        // Add to in-memory tasks and save to file
-        message.client.tasks.push(newTask);
-        const success = message.client.taskStorage.addTask(newTask);
+        // Save to guild-specific storage
+        const success = message.client.taskStorage.addTask(message.guild.id, newTask);
         
         if (success) {
             message.reply(`Assigned task to ${userMention.username}: "${taskDescription}"`);
