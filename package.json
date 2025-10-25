@@ -1,0 +1,21 @@
+{
+  "name": "task-manager-discord-bot",
+  "version": "1.0.0",
+  "description": "A Discord bot for managing tasks",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0",
+    "fs": "^0.0.1-security",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.0"
+  },
+  "keywords": ["discord", "bot", "task", "manager"],
+  "author": "Task Manager Bot",
+  "license": "MIT"
+}

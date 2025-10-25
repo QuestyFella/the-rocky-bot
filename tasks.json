@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1678886400000,
+    "title": "Sample task",
+    "description": "This is a sample task to demonstrate the bot functionality",
+    "dueDate": "2023-12-31",
+    "completed": false,
+    "createdAt": "2023-03-15T10:00:00.000Z",
+    "userId": "SAMPLE_USER_ID"
+  }
+]
