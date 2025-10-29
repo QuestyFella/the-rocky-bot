@@ -4,6 +4,16 @@ const fs = require('fs');
 const cron = require('node-cron');
 const TaskStorage = require('./taskStorage');
 
+// Create a new client instance
+const client = new Client({ 
+    intents: [ 
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMessages, 
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers
+    ] 
+});
+
 // Initialize server configurations
 client.serverConfigs = {};
 
@@ -44,16 +54,6 @@ function saveServerConfig(guildId, config) {
 // Make these functions available to commands
 client.loadServerConfig = loadServerConfig;
 client.saveServerConfig = saveServerConfig;
-
-// Create a new client instance
-const client = new Client({ 
-    intents: [ 
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildMessages, 
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
-    ] 
-});
 
 // Collection to store commands
 client.commands = new Collection();
