@@ -178,6 +178,18 @@ client.on('messageCreate', message => {
             message.reply('There was an error executing that command!');
         }
     }
+
+    if (message.content.startsWith('!utter')) {
+        const command = message.client.commands.get('utter');
+        if (command) {
+            try {
+                command.execute(message, message.content.slice('!utter'.length).trim().split(/ +/));
+            } catch (error) {
+                console.error(error);
+                message.reply('There was an error executing that command!');
+            }
+        }
+    }
 });
 
 // Login to Discord with your app's token
