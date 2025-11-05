@@ -1,8 +1,6 @@
-node_modules/
 .env
 tasks.json
 config.json
 server-tasks/server-configs/
 server-tasks/
-node_modules/
 reminders.json
