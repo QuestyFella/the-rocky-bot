@@ -6,7 +6,7 @@ module.exports = {
     execute(message, args) {
         const helpEmbed = new EmbedBuilder()
             .setColor(0x0099ff)
-            .setTitle('Task Manager Bot - Commands')
+            .setTitle('Bocchi Bot - Commands')
             .setDescription('**Task Management**\n' +
                 '`!task new`: Create a new task interactively.\n' +
                 '`!task add [task]`: Add a new task.\n' +
