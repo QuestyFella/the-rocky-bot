@@ -21,7 +21,7 @@ module.exports = {
                 '`!task assignrole @role [task]`: Assign a task to a role.\n' +
                 '`!task listrole @role`: List tasks for a role.\n' +
                 '`!task removerole @role`: Remove tasks for a role.\n' +
-                '`!task setchannel [#channel]`: Set the bot\'s channel.\n' +
+                '`!task setchannel [add|remove|list] [#channel]`: Manage allowed channels for the bot.\n' +
                 '`!task delete @user [number]`: Delete a user\'s task.\n\n' +
                 '**General**\n' +
                 '`!task help`: Show this help message.'

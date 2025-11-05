@@ -24,14 +24,20 @@ function loadServerConfig(guildId) {
     try {
         if (fs.existsSync(configPath)) {
             const configFile = fs.readFileSync(configPath, 'utf8');
-            return JSON.parse(configFile);
+            const config = JSON.parse(configFile);
+            // Backward compatibility: convert single channel ID to an array
+            if (config.allowedChannelId && !Array.isArray(config.allowedChannelIds)) {
+                config.allowedChannelIds = [config.allowedChannelId];
+                delete config.allowedChannelId;
+            }
+            return config;
         }
     } catch (error) {
         console.log(`No config file found for server ${guildId}, using default settings`);
     }
     
     // Return default config
-    return { allowedChannelId: null };
+    return { allowedChannelIds: [] };
 }
 
 // Function to save server configuration
@@ -146,7 +152,7 @@ client.on('messageCreate', message => {
         const serverConfig = message.client.serverConfigs[message.guild.id];
         
         // Check if the bot is restricted to a specific channel
-        if (serverConfig.allowedChannelId && message.channel.id !== serverConfig.allowedChannelId) {
+        if (serverConfig.allowedChannelIds && serverConfig.allowedChannelIds.length > 0 && !serverConfig.allowedChannelIds.includes(message.channel.id)) {
             // Allow the setchannel command to work in any channel
             const potentialCommand = message.content.slice('!task'.length).trim().split(/ +/)[0].toLowerCase();
             if (potentialCommand !== 'setchannel') {
