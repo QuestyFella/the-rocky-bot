@@ -82,6 +82,8 @@ client.once('ready', () => {
     
     // Set bot activity
     client.user.setActivity('your tasks | Use /help', { type: 'WATCHING' });
+
+    scheduleReminders(client);
     
     // Schedule task reminder summary every day at midnight and noon
     cron.schedule('0 0,12 * * *', async () => {
@@ -180,3 +182,44 @@ client.on('messageCreate', message => {
 
 // Login to Discord with your app's token
 client.login(process.env.DISCORD_TOKEN);
+
+client.reminders = [];
+
+// Function to schedule a single reminder
+function scheduleReminder(client, reminder) {
+    const timeRemaining = reminder.remindAt - Date.now();
+
+    if (timeRemaining > 0) {
+        setTimeout(async () => {
+            try {
+                const user = await client.users.fetch(reminder.userId);
+                if (user) {
+                    user.send(`Reminder: "${reminder.message}"`)
+                        .catch(error => console.error(`Could not send reminder DM to user ${reminder.userId}:`, error));
+                }
+            } catch (error) {
+                console.error(`Could not fetch user ${reminder.userId} for reminder:`, error);
+            }
+
+            // Remove the reminder after sending
+            client.reminders = client.reminders.filter(r => r !== reminder);
+            fs.writeFileSync('./reminders.json', JSON.stringify(client.reminders, null, 2));
+        }, timeRemaining);
+    }
+}
+
+// Function to load and schedule all reminders
+function scheduleReminders(client) {
+    const remindersFilePath = './reminders.json';
+
+    if (!fs.existsSync(remindersFilePath)) {
+        fs.writeFileSync(remindersFilePath, JSON.stringify([]), 'utf8');
+    }
+
+    client.reminders = JSON.parse(fs.readFileSync(remindersFilePath, 'utf8'));
+
+    client.reminders.forEach(reminder => scheduleReminder(client, reminder));
+}
+
+// Make scheduleReminder available to commands
+client.scheduleReminder = scheduleReminder;
