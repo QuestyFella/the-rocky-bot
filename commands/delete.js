@@ -1,28 +1,36 @@
 module.exports = {
     name: 'delete',
-    description: 'Delete a task',
+    description: "Delete your own or another user's task.",
     execute(message, args) {
-        // Get user tasks from guild-specific storage
-        const userTasks = message.client.taskStorage.getUserTasks(message.guild.id, message.author.id);
-        
-        if (!args.length) {
-            return message.reply('Please provide a task number to delete!');
+        const userToModify = message.mentions.users.first() || message.author;
+        const isSelf = userToModify.id === message.author.id;
+        const taskNumberArg = isSelf ? args[0] : args[1];
+
+        if (!isSelf && !message.member.permissions.has('Administrator')) {
+            return message.reply('You must have administrator permissions to delete other users\' tasks!');
         }
-        
-        const taskIndex = parseInt(args[0]) - 1;
+
+        if (!taskNumberArg) {
+            return message.reply('Please provide a task number to delete.');
+        }
+
+        const taskIndex = parseInt(taskNumberArg) - 1;
+        const userTasks = message.client.taskStorage.getUserTasks(message.guild.id, userToModify.id);
+
         if (isNaN(taskIndex) || taskIndex < 0 || taskIndex >= userTasks.length) {
-            return message.reply('Please provide a valid task number!');
+            return message.reply('Please provide a valid task number.');
         }
-        
+
         const taskToDelete = userTasks[taskIndex];
-        
-        // Delete the task from guild-specific storage
         const success = message.client.taskStorage.deleteTask(message.guild.id, taskToDelete.id);
-        
+
         if (success) {
-            message.reply(`Deleted task: "${taskToDelete.title}"`);
+            const reply = isSelf 
+                ? `Deleted task: "${taskToDelete.title}"`
+                : `Deleted task "${taskToDelete.title}" from ${userToModify.username}'s list.`;
+            message.reply(reply);
         } else {
-            message.reply('Failed to delete task from storage.');
+            message.reply('Failed to delete the task.');
         }
     }
 };

@@ -7,23 +7,24 @@ module.exports = {
         const helpEmbed = new EmbedBuilder()
             .setColor(0x0099ff)
             .setTitle('Task Manager Bot - Commands')
-            .setDescription('Here are the available commands:')
-            .addFields(
-                { name: '!task add [task]', value: 'Add a new task' },
-                { name: '!task assign @user [task]', value: 'Assign a task to another user (Admin only)' },
-                { name: '!task assignrole @role [task]', value: 'Assign a task to all members of a role (Admin only)' },
-                { name: '!task listrole @role', value: 'List tasks assigned to a role (Admin only)' },
-                { name: '!task removerole @role', value: 'Remove all tasks assigned to a role (Admin only)' },
-                { name: '!task setchannel [#channel]', value: 'Set the channel where the bot operates (Admin only)' },
-                { name: '!task list', value: 'List all your tasks' },
-                { name: '!task assigned', value: 'List tasks assigned to you by others' },
-                { name: '!task detailed', value: 'Show detailed view of all tasks' },
-                { name: '!task complete [number]', value: 'Mark a task as complete' },
-                { name: '!task delete [number]', value: 'Delete a task' },
-                { name: '!task edit [number] [description]', value: 'Edit a task description' },
-                { name: '!task duedate [number] [date]', value: 'Set a due date for a task' },
-                { name: '!task clear', value: 'Clear all completed tasks' },
-                { name: '!task help', value: 'Show this help message' }
+            .setDescription('**Task Management**\n' +
+                '`!task new`: Create a new task interactively.\n' +
+                '`!task add [task]`: Add a new task.\n' +
+                '`!task view [@user]`: View your or another user\'s tasks.\n' +
+                '`!task edit [number] [description]`: Edit a task.\n' +
+                '`!task complete [number]`: Mark a task as complete.\n' +
+                '`!task delete [number]`: Delete a task.\n' +
+                '`!task duedate [number] [date]`: Set a due date.\n' +
+                '`!task clear`: Clear all completed tasks.\n\n' +
+                '**Admin**\n' +
+                '`!task assign @user [task]`: Assign a task to a user.\n' +
+                '`!task assignrole @role [task]`: Assign a task to a role.\n' +
+                '`!task listrole @role`: List tasks for a role.\n' +
+                '`!task removerole @role`: Remove tasks for a role.\n' +
+                '`!task setchannel [#channel]`: Set the bot\'s channel.\n' +
+                '`!task delete @user [number]`: Delete a user\'s task.\n\n' +
+                '**General**\n' +
+                '`!task help`: Show this help message.'
             )
             .setTimestamp();
         
