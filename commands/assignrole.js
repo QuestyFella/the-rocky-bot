@@ -21,9 +21,32 @@ module.exports = {
             }
         }
         
-        // Get the task description (everything after the role)
-        const taskDescription = args.slice(1).join(' ');
-        
+        const taskArgs = args.slice(1);
+        let taskDescription = taskArgs.join(' ');
+        let dueDate = null;
+
+        const keywords = ['by', 'on', 'at'];
+        let keywordIndex = -1;
+
+        for (const kw of keywords) {
+            const index = taskArgs.lastIndexOf(kw);
+            if (index > keywordIndex) {
+                keywordIndex = index;
+            }
+        }
+
+        if (keywordIndex !== -1) {
+            taskDescription = taskArgs.slice(0, keywordIndex).join(' ');
+            const dueDateInput = taskArgs.slice(keywordIndex + 1).join(' ');
+            
+            if (dueDateInput) {
+                const parsedDate = new Date(dueDateInput);
+                if (!isNaN(parsedDate.getTime())) {
+                    dueDate = parsedDate.toISOString().split('T')[0];
+                }
+            }
+        }
+
         if (!taskDescription) {
             return message.reply('Please provide a task description!');
         }
@@ -45,7 +68,7 @@ module.exports = {
                 id: Date.now() + successCount, // unique ID
                 title: taskDescription,
                 description: `Assigned to role: ${role.name} by ${message.author.username}`,
-                dueDate: null,
+                dueDate: dueDate,
                 completed: false,
                 createdAt: new Date().toISOString(),
                 userId: member.user.id, // Assign to the role member
@@ -62,6 +85,10 @@ module.exports = {
             }
         }
         
-        message.reply(`Successfully assigned task to ${successCount} member(s) with role ${role.toString()}: "${taskDescription}"`);
+        let replyMessage = `Successfully assigned task to ${successCount} member(s) with role ${role.toString()}: "${taskDescription}"`;
+        if (dueDate) {
+            replyMessage += ` with due date: ${dueDate}`;
+        }
+        message.reply(replyMessage);
     }
 };

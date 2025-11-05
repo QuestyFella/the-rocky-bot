@@ -77,38 +77,46 @@ client.once('ready', () => {
     // Set bot activity
     client.user.setActivity('your tasks | Use /help', { type: 'WATCHING' });
     
-    // Schedule task reminder check every day at midnight
-    cron.schedule('0 0 * * *', async () => {
-        console.log('Checking for tasks due tomorrow...');
-        
+    // Schedule task reminder summary every day at midnight and noon
+    cron.schedule('0 0,12 * * *', async () => {
+        console.log('Sending due date summary...');
+    
         // Get all available guilds
         for (const guild of client.guilds.cache.values()) {
-            // Load tasks for this specific guild
-            const guildTasks = client.taskStorage.getAllTasks(guild.id);
+            // Load all tasks for this specific guild
+            const allTasks = client.taskStorage.getAllTasks(guild.id);
             
-            const tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            const tomorrowString = tomorrow.toISOString().split('T')[0]; // Format as YYYY-MM-DD
+            // Filter for tasks with a due date that are not completed
+            const tasksWithDueDate = allTasks.filter(task => task.dueDate && !task.completed);
             
-            // Find tasks due tomorrow that aren't completed in this guild
-            const tasksDueTomorrow = guildTasks.filter(task => {
-                return task.dueDate === tomorrowString && !task.completed;
-            });
+            if (tasksWithDueDate.length === 0) {
+                continue; // No tasks with due dates in this guild
+            }
             
-            console.log(`Found ${tasksDueTomorrow.length} tasks due tomorrow in guild ${guild.name}`);
+            // Group tasks by user
+            const userTasks = {};
+            for (const task of tasksWithDueDate) {
+                if (!userTasks[task.userId]) {
+                    userTasks[task.userId] = [];
+                }
+                userTasks[task.userId].push(task);
+            }
             
-            for (const task of tasksDueTomorrow) {
+            // Send a summary to each user
+            for (const userId in userTasks) {
                 try {
-                    // Find the user in the Discord server
-                    const user = await client.users.fetch(task.userId);
-                    
+                    const user = await client.users.fetch(userId);
                     if (user) {
-                        // Attempt to send a direct message to the user
-                        await user.send(`⏰ Reminder: Your task "${task.title}" is due tomorrow! (from ${guild.name})`);
-                        console.log(`Sent reminder to user ${user.username} for task: ${task.title}`);
+                        let summaryMessage = 'Here is a summary of your tasks with due dates:\n\n';
+                        for (const task of userTasks[userId]) {
+                            summaryMessage += `- **${task.title}** - Due: ${task.dueDate}\n`;
+                        }
+                        
+                        await user.send(summaryMessage);
+                        console.log(`Sent due date summary to user ${user.username}`);
                     }
                 } catch (error) {
-                    console.error(`Could not send reminder to user ID ${task.userId}:`, error);
+                    console.error(`Could not send summary to user ID ${userId}:`, error);
                 }
             }
         }
@@ -117,7 +125,7 @@ client.once('ready', () => {
         timezone: "America/Toronto" // Set appropriate timezone
     });
     
-    console.log('Task reminder scheduler started');
+    console.log('Task reminder summary scheduler started');
 });
 
 // When a message is received
