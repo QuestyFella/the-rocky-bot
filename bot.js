@@ -81,7 +81,7 @@ client.once('ready', () => {
     console.log(`Task Manager Bot is ready! Logged in as ${client.user.tag}`);
     
     // Set bot activity
-    client.user.setActivity('your tasks | Use /help', { type: 'WATCHING' });
+    client.user.setActivity('your tasks | Use !task help', { type: 'WATCHING' });
 
     scheduleReminders(client);
     
@@ -134,12 +134,32 @@ client.once('ready', () => {
     });
     
     console.log('Task reminder summary scheduler started');
+    console.log('Task reminder summary scheduler started');
+
+    // Schedule noticeboard updates (every 2 minutes)
+    cron.schedule('*/2 * * * *', async () => {
+        const noticeCommand = client.commands.get('notice');
+        if (noticeCommand && noticeCommand.updateNoticeboard) {
+            // Get all guilds with active noticeboards involves reading the file, 
+            // but the command logic handles reading/validating.
+            // We need to iterate over known guilds or just let the command handle it?
+            // The command's updateNoticeboard takes a guildId.
+            // Let's iterate all guilds client is in.
+            for (const guild of client.guilds.cache.values()) {
+                await noticeCommand.updateNoticeboard(client, guild.id);
+            }
+        }
+    });
+    console.log('Noticeboard updater started');
 });
 
 // When a message is received
 client.on('messageCreate', message => {
     // Ignore messages from bots
     if (message.author.bot) return;
+
+    // Debug logging to verify message content intent
+    console.log(`Received message: ${message.content} from ${message.author.tag} in ${message.guild ? message.guild.name : 'DM'}`);
     
     // Check if it's a guild message (not a DM)
     if (!message.guild) return;
@@ -184,6 +204,23 @@ client.on('messageCreate', message => {
         if (command) {
             try {
                 command.execute(message, message.content.slice('!utter'.length).trim().split(/ +/));
+            } catch (error) {
+                console.error(error);
+                message.reply('There was an error executing that command!');
+            }
+        }
+    }
+
+
+    if (message.content.startsWith('!notice')) {
+        const args = message.content.slice('!notice'.length).trim().split(/ +/);
+        // If no args, default to help or something? But command expects subcommands.
+        // commands/notice.js handles args[0]
+        
+        const command = message.client.commands.get('notice');
+        if (command) {
+            try {
+                command.execute(message, args);
             } catch (error) {
                 console.error(error);
                 message.reply('There was an error executing that command!');
