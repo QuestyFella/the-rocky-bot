@@ -122,7 +122,10 @@ module.exports = {
 
         if (subcommand === 'generate') {
             const embed = await generateNoticeboardEmbed(message.client, message.guild.id);
-            const sentMessage = await message.channel.send({ embeds: [embed] });
+            const sentMessage = await message.channel.send({ 
+                embeds: [embed],
+                allowedMentions: { parse: [] } // Suppress all pings
+            });
 
             // Save this message as the active noticeboard for this guild
             const noticeboards = loadNoticeboards();
@@ -160,7 +163,10 @@ module.exports = {
             // BUT "OVERDUE" status calc is server-side.
             // Also adds/removes/edits need to be reflected.
             
-            await message.edit({ embeds: [newEmbed] });
+            await message.edit({ 
+                embeds: [newEmbed],
+                allowedMentions: { parse: [] } // Suppress all pings
+            });
             
         } catch (error) {
             console.error(`Failed to update noticeboard for guild ${guildId}:`, error);

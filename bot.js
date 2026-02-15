@@ -66,7 +66,16 @@ client.commands = new Collection();
 
 // Initialize task storage
 client.taskStorage = new TaskStorage();
+client.taskStorage = new TaskStorage();
 client.tasks = client.taskStorage.getAllTasks();
+
+// Listen for task updates to refresh noticeboards immediately
+client.taskStorage.setUpdateListener(async (guildId) => {
+    const noticeCommand = client.commands.get('notice');
+    if (noticeCommand && noticeCommand.updateNoticeboard) {
+        await noticeCommand.updateNoticeboard(client, guildId);
+    }
+});
 
 // Load commands
 const commandFiles = fs.readdirSync('./commands').filter(file => file.endsWith('.js'));
@@ -115,6 +124,8 @@ client.once('ready', () => {
                 try {
                     const user = await client.users.fetch(userId);
                     if (user) {
+                        /* 
+                        // DM functionality disabled by request
                         let summaryMessage = 'Here is a summary of your tasks with due dates:\n\n';
                         for (const task of userTasks[userId]) {
                             summaryMessage += `- **${task.title}** - Due: ${task.dueDate}\n`;
@@ -122,9 +133,11 @@ client.once('ready', () => {
                         
                         await user.send(summaryMessage);
                         console.log(`Sent due date summary to user ${user.username}`);
+                         */
+                        console.log(`Skipped due date summary for ${user.username} (DMs disabled)`);
                     }
                 } catch (error) {
-                    console.error(`Could not send summary to user ID ${userId}:`, error);
+                    console.error(`Could not process summary for user ID ${userId}:`, error);
                 }
             }
         }
@@ -243,8 +256,12 @@ function scheduleReminder(client, reminder) {
             try {
                 const user = await client.users.fetch(reminder.userId);
                 if (user) {
+                    /*
+                    // DM functionality disabled by request
                     user.send(`Reminder: "${reminder.message}"`)
                         .catch(error => console.error(`Could not send reminder DM to user ${reminder.userId}:`, error));
+                    */
+                   console.log(`Reminder for ${user.username}: "${reminder.message}" (DMs disabled)`);
                 }
             } catch (error) {
                 console.error(`Could not fetch user ${reminder.userId} for reminder:`, error);

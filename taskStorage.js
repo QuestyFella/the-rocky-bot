@@ -5,6 +5,11 @@ class TaskStorage {
     constructor(tasksDir = './server-tasks') {
         this.tasksDir = tasksDir;
         this.ensureDirectoryExists();
+        this.updateListener = null;
+    }
+
+    setUpdateListener(callback) {
+        this.updateListener = callback;
     }
 
     ensureDirectoryExists() {
@@ -41,6 +46,9 @@ class TaskStorage {
         try {
             const filePath = this.getFilePath(guildId);
             fs.writeFileSync(filePath, JSON.stringify(tasks, null, 2), 'utf8');
+            if (this.updateListener) {
+                this.updateListener(guildId);
+            }
             return true;
         } catch (error) {
             console.error(`Error saving tasks for guild ${guildId}:`, error);
