@@ -39,8 +39,29 @@ module.exports = {
         }
 
         const lastMessage = answers[3];
+        const lastContent = assigneeInput; // content string
         const mentionedUser = lastMessage.mentions.users.first();
         const mentionedRole = lastMessage.mentions.roles.first();
+
+        let targetUser = mentionedUser;
+        let targetRole = mentionedRole;
+
+        // If no mentions, check for IDs
+        if (!targetUser && !targetRole && assigneeInput.toLowerCase() !== 'me') {
+            const id = lastContent.replace(/[<@!&>]/g, '');
+            if (/^\d{17,19}$/.test(id)) {
+                // Try fetching user
+                try {
+                    targetUser = await message.client.users.fetch(id);
+                } catch (e) {
+                    // Not a user or fetch failed, try role
+                    targetRole = message.guild.roles.cache.get(id);
+                }
+                
+                // If fetch succeeded but it's not a user in the guild member list (optional check)
+                // but client.users.fetch gets global user.
+            }
+        }
 
         if (assigneeInput.toLowerCase() === 'me') {
             const newTask = {
@@ -60,7 +81,7 @@ module.exports = {
             } else {
                 message.reply('Failed to save task to storage.');
             }
-        } else if (mentionedUser) {
+        } else if (targetUser) {
             const newTask = {
                 id: Date.now(),
                 title: title,
@@ -68,19 +89,19 @@ module.exports = {
                 dueDate: dueDate,
                 completed: false,
                 createdAt: new Date().toISOString(),
-                userId: mentionedUser.id,
+                userId: targetUser.id,
                 assignedBy: message.author.id,
                 guildId: message.guild.id
             };
             const success = message.client.taskStorage.addTask(message.guild.id, newTask);
             if (success) {
-                message.reply(`Task "${title}" created and assigned to ${mentionedUser.username}.`);
+                message.reply(`Task "${title}" created and assigned to ${targetUser.username}.`);
             } else {
                 message.reply('Failed to save task to storage.');
             }
-        } else if (mentionedRole) {
+        } else if (targetRole) {
             const membersWithRole = message.guild.members.cache.filter(member => 
-                member.roles.cache.has(mentionedRole.id) && !member.user.bot
+                member.roles.cache.has(targetRole.id) && !member.user.bot
             );
 
             if (membersWithRole.size === 0) {
@@ -98,7 +119,7 @@ module.exports = {
                     createdAt: new Date().toISOString(),
                     userId: member.user.id,
                     assignedBy: message.author.id,
-                    assignedToRole: mentionedRole.id,
+                    assignedToRole: targetRole.id,
                     guildId: message.guild.id
                 };
                 const success = message.client.taskStorage.addTask(message.guild.id, newTask);
@@ -108,7 +129,7 @@ module.exports = {
             }
             message.reply(`Successfully assigned task to ${successCount} member(s) with the role.`);
         } else {
-            return message.reply("I couldn't figure out who to assign the task to. Please try again and make sure to mention a user or a role, or say 'me'.");
+            return message.reply("I couldn't figure out who to assign the task to. Please try again and make sure to mention a user or a role, or provide a valid ID, or say 'me'.");
         }
     }
 };

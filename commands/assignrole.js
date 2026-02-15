@@ -11,13 +11,23 @@ module.exports = {
             return message.reply('Please provide a role mention/name and a task description (e.g., "!task assignrole @role Do something")');
         }
         
-        // Find the role - check mentions first, then by name
+        // Find the role - check mentions first, then by ID, then by name
         let role = message.mentions.roles.first();
         if (!role) {
-            // If not mentioned, try to find by name
-            role = message.guild.roles.cache.find(r => r.name.toLowerCase() === args[0].toLowerCase());
+            const roleIdOrName = args[0].replace(/[<@&>]/g, '');
+            
+            // Try to find by ID
+            if (/^\d{17,19}$/.test(roleIdOrName)) {
+                role = message.guild.roles.cache.get(roleIdOrName);
+            }
+            
+            // If still not found, try by name
             if (!role) {
-                return message.reply('Please mention a valid role or provide a role name!');
+                role = message.guild.roles.cache.find(r => r.name.toLowerCase() === args[0].toLowerCase());
+            }
+
+            if (!role) {
+                return message.reply('Please mention a valid role, provide a valid role ID, or provide a valid role name!');
             }
         }
         

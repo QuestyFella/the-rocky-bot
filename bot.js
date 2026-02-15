@@ -66,7 +66,6 @@ client.commands = new Collection();
 
 // Initialize task storage
 client.taskStorage = new TaskStorage();
-client.taskStorage = new TaskStorage();
 client.tasks = client.taskStorage.getAllTasks();
 
 // Listen for task updates to refresh noticeboards immediately
@@ -146,7 +145,6 @@ client.once('ready', () => {
         timezone: "America/Toronto" // Set appropriate timezone
     });
     
-    console.log('Task reminder summary scheduler started');
     console.log('Task reminder summary scheduler started');
 
     // Schedule noticeboard updates (every 2 minutes)

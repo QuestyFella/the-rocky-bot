@@ -1,7 +1,7 @@
 module.exports = {
     name: 'assign',
     description: 'Assign a task to another user',
-    execute(message, args) {
+    async execute(message, args) {
         // Check if the user has admin permissions
         if (!message.member.permissions.has('Administrator')) {
             return message.reply('You must have administrator permissions to assign tasks to others!');
@@ -12,9 +12,19 @@ module.exports = {
         }
         
         // Get the mentioned user
-        const userMention = message.mentions.users.first();
+        let userMention = message.mentions.users.first();
         if (!userMention) {
-            return message.reply('Please mention a user to assign the task to!');
+            // Check if first arg is a User ID
+            const userId = args[0].replace(/[<@!>]/g, '');
+            if (/^\d{17,19}$/.test(userId)) {
+                try {
+                    userMention = await message.client.users.fetch(userId);
+                } catch (error) {
+                    return message.reply('Invalid user ID provided or user not found.');
+                }
+            } else {
+                return message.reply('Please mention a user or provide a valid user ID to assign the task to!');
+            }
         }
         
         // Get the task description (everything after the user mention)
