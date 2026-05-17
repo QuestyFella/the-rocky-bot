@@ -4,3 +4,4 @@ config.json
 server-tasks/server-configs/
 server-tasks/
 reminders.json
+jiraBoards.json

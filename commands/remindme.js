@@ -1,12 +1,11 @@
 const ms = require('ms');
-const fs = require('fs');
 
 module.exports = {
     name: 'remindme',
     description: 'Set, list, view, or delete a reminder for yourself.',
     execute(message, args) {
         const subCommand = args[0] ? args[0].toLowerCase() : null;
-        const reminders = JSON.parse(fs.readFileSync('./reminders.json', 'utf8'));
+        const reminders = message.client.loadReminders();
         const userReminders = reminders.filter(r => r.userId === message.author.id);
 
         if (subCommand === 'list') {
@@ -32,7 +31,8 @@ module.exports = {
             }
             const reminderToDelete = userReminders[index];
             const newReminders = reminders.filter(r => r !== reminderToDelete);
-            fs.writeFileSync('./reminders.json', JSON.stringify(newReminders, null, 2));
+            message.client.reminders = newReminders;
+            message.client.saveReminders(newReminders);
             return message.reply(`Deleted reminder: "${reminderToDelete.message}"`);
         }
 
@@ -76,7 +76,8 @@ module.exports = {
         };
 
         reminders.push(reminder);
-        fs.writeFileSync('./reminders.json', JSON.stringify(reminders, null, 2));
+        message.client.reminders = reminders;
+        message.client.saveReminders(reminders);
 
         message.client.scheduleReminder(message.client, reminder);
 

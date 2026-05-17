@@ -6,6 +6,7 @@ class TaskStorage {
         this.tasksDir = tasksDir;
         this.ensureDirectoryExists();
         this.updateListener = null;
+        this.cache = new Map();
     }
 
     setUpdateListener(callback) {
@@ -30,12 +31,18 @@ class TaskStorage {
         }
     }
 
-    loadTasks(guildId) {
+    loadTasks(guildId, forceReload = false) {
+        if (!forceReload && this.cache.has(guildId)) {
+            return this.cache.get(guildId);
+        }
+
         this.ensureFileExists(guildId);
         try {
             const filePath = this.getFilePath(guildId);
             const data = fs.readFileSync(filePath, 'utf8');
-            return JSON.parse(data);
+            const tasks = data.trim() ? JSON.parse(data) : [];
+            this.cache.set(guildId, tasks);
+            return tasks;
         } catch (error) {
             console.error(`Error loading tasks for guild ${guildId}:`, error);
             return [];
@@ -45,9 +52,12 @@ class TaskStorage {
     saveTasks(guildId, tasks) {
         try {
             const filePath = this.getFilePath(guildId);
+            this.cache.set(guildId, tasks);
             fs.writeFileSync(filePath, JSON.stringify(tasks, null, 2), 'utf8');
             if (this.updateListener) {
-                this.updateListener(guildId);
+                Promise.resolve(this.updateListener(guildId)).catch(error => {
+                    console.error(`Error running task update listener for guild ${guildId}:`, error);
+                });
             }
             return true;
         } catch (error) {
