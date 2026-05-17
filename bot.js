@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, Events, GatewayIntentBits } = require('discord.js');
 require('dotenv').config();
 const path = require('path');
 const cron = require('node-cron');
@@ -10,12 +10,6 @@ const {
     loadServerConfig,
     saveServerConfig
 } = require('./utils/serverConfig');
-const {
-    loadReminders,
-    saveReminders,
-    scheduleReminder,
-    scheduleReminders
-} = require('./utils/reminders');
 
 const client = new Client({
     intents: [
@@ -30,75 +24,34 @@ client.serverConfigs = {};
 client.taskStorage = new TaskStorage();
 client.loadServerConfig = loadServerConfig;
 client.saveServerConfig = saveServerConfig;
-client.loadReminders = loadReminders;
-client.saveReminders = saveReminders;
-client.scheduleReminder = scheduleReminder;
-client.reminders = [];
 
-const { commands, commandList } = loadCommands(path.join(__dirname, 'commands'));
-client.commands = commands;
-client.commandList = commandList;
+client.commands = loadCommands(path.join(__dirname, 'commands'));
 
 client.taskStorage.setUpdateListener(async (guildId) => {
-    const jiraCommand = client.commands.get('jira');
-    if (jiraCommand && jiraCommand.updateJiraBoard) {
-        await jiraCommand.updateJiraBoard(client, guildId);
+    const boardCommand = client.commands.get('board');
+    if (boardCommand && boardCommand.updateBoard) {
+        await boardCommand.updateBoard(client, guildId);
     }
 });
 
-async function sendDueDateSummary() {
-    console.log('Sending due date summary...');
-
-    for (const guild of client.guilds.cache.values()) {
-        const tasksWithDueDate = client.taskStorage
-            .getAllTasks(guild.id)
-            .filter(task => task.dueDate && !task.completed && task.userId);
-
-        const userTasks = tasksWithDueDate.reduce((groupedTasks, task) => {
-            groupedTasks[task.userId] = groupedTasks[task.userId] || [];
-            groupedTasks[task.userId].push(task);
-            return groupedTasks;
-        }, {});
-
-        for (const userId of Object.keys(userTasks)) {
-            try {
-                const user = await client.users.fetch(userId);
-                if (user) {
-                    console.log(`Skipped due date summary for ${user.username} (DMs disabled)`);
-                }
-            } catch (error) {
-                console.error(`Could not process summary for user ID ${userId}:`, error);
-            }
-        }
-    }
-}
-
 function scheduleLiveBoardUpdates() {
     cron.schedule('*/2 * * * *', async () => {
-        const jiraCommand = client.commands.get('jira');
-        if (!jiraCommand || !jiraCommand.updateJiraBoard) {
+        const boardCommand = client.commands.get('board');
+        if (!boardCommand || !boardCommand.updateBoard) {
             return;
         }
 
         for (const guild of client.guilds.cache.values()) {
-            await jiraCommand.updateJiraBoard(client, guild.id);
+            await boardCommand.updateBoard(client, guild.id);
         }
     });
 
     console.log('Live board updater started');
 }
 
-client.once('ready', () => {
+client.once(Events.ClientReady, () => {
     console.log(`Task Manager Bot is ready! Logged in as ${client.user.tag}`);
-    client.user.setActivity('Kanban board | Use !task help', { type: 'WATCHING' });
-
-    scheduleReminders(client);
-
-    cron.schedule('0 0,12 * * *', sendDueDateSummary, {
-        scheduled: true,
-        timezone: 'America/Toronto'
-    });
-    console.log('Task reminder summary scheduler started');
+    client.user.setActivity('Kanban board | Use !task', { type: 'WATCHING' });
 
     scheduleLiveBoardUpdates();
 });

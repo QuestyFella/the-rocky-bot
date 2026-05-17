@@ -1,8 +1,9 @@
 const { EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const fs = require('fs');
 
-const boardConfigFile = './jiraBoards.json';
-const jiraBlue = 0x0052cc;
+const boardConfigFile = './kanbanBoards.json';
+const legacyBoardConfigFile = './jiraBoards.json';
+const kanbanBlue = 0x0052cc;
 let boardConfigCache = null;
 
 const columns = [
@@ -63,17 +64,18 @@ function loadBoardConfigs() {
         return boardConfigCache;
     }
 
-    if (!fs.existsSync(boardConfigFile)) {
+    const configFile = fs.existsSync(boardConfigFile) ? boardConfigFile : legacyBoardConfigFile;
+    if (!fs.existsSync(configFile)) {
         boardConfigCache = {};
         return boardConfigCache;
     }
 
     try {
-        const raw = fs.readFileSync(boardConfigFile, 'utf8');
+        const raw = fs.readFileSync(configFile, 'utf8');
         boardConfigCache = raw.trim() ? JSON.parse(raw) : {};
         return boardConfigCache;
     } catch (error) {
-        console.error('Failed to load Jira board configs:', error);
+        console.error('Failed to load Kanban board configs:', error);
         boardConfigCache = {};
         return boardConfigCache;
     }
@@ -254,7 +256,11 @@ function sortBoardTasks(tasks) {
 }
 
 function getIssueDisplayKey(task, displayIndex) {
-    return task.jiraKey || `#${displayIndex + 1}`;
+    return getIssueKey(task) || `#${displayIndex + 1}`;
+}
+
+function getIssueKey(task) {
+    return task.issueKey || task.jiraKey;
 }
 
 function formatIssueLine(task, displayIndex) {
@@ -303,10 +309,10 @@ function generateBoardEmbed(client, guildId, guildName = 'Server') {
     const doneCount = tasks.length - activeCount;
 
     const embed = new EmbedBuilder()
-        .setColor(jiraBlue)
+        .setColor(kanbanBlue)
         .setTitle(config.title || `${guildName} Kanban Board`)
-        .setDescription(`${activeCount} active issue(s), ${doneCount} done. Use \`!task jira help\` for commands.`)
-        .setFooter({ text: 'Add: !task jira add Task title | Move: !task jira move KEY doing' })
+        .setDescription(`${activeCount} active issue(s), ${doneCount} done. Use \`!task help\` for commands.`)
+        .setFooter({ text: 'Add: !task add Task title | Move: !task move KEY doing' })
         .setTimestamp();
 
     for (const column of columns) {
@@ -329,7 +335,7 @@ function findTask(message, identifier) {
         return { tasks, task: null };
     }
 
-    let task = tasks.find(item => String(item.jiraKey || '').toUpperCase() === lookup);
+    let task = tasks.find(item => String(getIssueKey(item) || '').toUpperCase() === lookup);
 
     if (!task && /^\d+$/.test(lookup)) {
         task = tasks.find(item => String(item.id) === lookup);
@@ -498,7 +504,7 @@ function buildIssueEmbed(task, displayIndex) {
     const priority = priorities[getTaskPriority(task)];
     const issueKey = getIssueDisplayKey(task, displayIndex);
     const embed = new EmbedBuilder()
-        .setColor(jiraBlue)
+        .setColor(kanbanBlue)
         .setTitle(`${issueKey}: ${task.title}`)
         .setDescription(task.description || 'No description.')
         .addFields(
@@ -514,7 +520,7 @@ function buildIssueEmbed(task, displayIndex) {
     return embed;
 }
 
-async function updateJiraBoard(client, guildId) {
+async function updateBoard(client, guildId) {
     const configs = loadBoardConfigs();
     const config = configs[guildId];
 
@@ -537,27 +543,27 @@ async function updateJiraBoard(client, guildId) {
             allowedMentions: { parse: [] }
         });
     } catch (error) {
-        console.error(`Failed to update Jira board for guild ${guildId}:`, error);
+        console.error(`Failed to update Kanban board for guild ${guildId}:`, error);
     }
 }
 
 function sendUsage(message) {
     const embed = new EmbedBuilder()
-        .setColor(jiraBlue)
-        .setTitle('Jira/Kanban Commands')
+        .setColor(kanbanBlue)
+        .setTitle('Kanban Board Commands')
         .setDescription(
-            '`!task jira setup` - Create a live-updating board in this channel.\n' +
-            '`!task jira` - Show the board once.\n' +
-            '`!task jira add Fix avionics @user by 2026-06-01` - Add an issue.\n' +
-            '`!task jira move KEY doing` - Move an issue between columns.\n' +
-            '`!task jira claim KEY` - Assign an issue to yourself.\n' +
-            '`!task jira assign KEY @user` - Assign an issue.\n' +
-            '`!task jira priority KEY high` - Set priority.\n' +
-            '`!task jira due KEY 2026-06-01` - Set or clear a due date.\n' +
-            '`!task jira details KEY` - Show one issue.\n' +
-            '`!task jira edit KEY New title` - Rename an issue.\n' +
-            '`!task jira delete KEY` - Delete an issue.\n\n' +
-            'Aliases: `!task board` and `!task kanban`. Columns: `todo`, `doing`, `review`, `done`. Priorities: `low`, `medium`, `high`, `urgent`.'
+            '`!task setup` - Create a live-updating board in this channel.\n' +
+            '`!task` - Show the board once.\n' +
+            '`!task add Fix avionics @user by 2026-06-01` - Add an issue.\n' +
+            '`!task move KEY doing` - Move an issue between columns.\n' +
+            '`!task claim KEY` - Assign an issue to yourself.\n' +
+            '`!task assign KEY @user` - Assign an issue.\n' +
+            '`!task priority KEY high` - Set priority.\n' +
+            '`!task due KEY 2026-06-01` - Set or clear a due date.\n' +
+            '`!task details KEY` - Show one issue.\n' +
+            '`!task edit KEY New title` - Rename an issue.\n' +
+            '`!task delete KEY` - Delete an issue.\n\n' +
+            'Aliases: `!task board`, `!task kanban`, and `!task jira`. Columns: `todo`, `doing`, `review`, `done`. Priorities: `low`, `medium`, `high`, `urgent`.'
         )
         .setTimestamp();
 
@@ -565,9 +571,9 @@ function sendUsage(message) {
 }
 
 module.exports = {
-    name: 'jira',
-    aliases: ['kanban', 'board'],
-    description: 'Manage a Jira-style Kanban board with embeds',
+    name: 'board',
+    aliases: ['kanban', 'jira'],
+    description: 'Manage a Kanban board with embeds',
     async execute(message, args) {
         const subcommand = (args.shift() || 'board').toLowerCase();
 
@@ -603,14 +609,14 @@ module.exports = {
                 return message.reply('You need Manage Guild permissions to refresh the live board.');
             }
 
-            await updateJiraBoard(message.client, message.guild.id);
+            await updateBoard(message.client, message.guild.id);
             return message.reply('Live Kanban board refreshed.');
         }
 
         if (subcommand === 'add') {
             const parsed = parseAddArgs(message, args);
             if (!parsed.title) {
-                return message.reply('Please provide an issue title. Example: `!task jira add Fix avionics @Sam by 2026-06-01`');
+                return message.reply('Please provide an issue title. Example: `!task add Fix avionics @Sam by 2026-06-01`');
             }
             if (!userCanAssignTo(message, parsed.user, parsed.role)) {
                 return message.reply('You need Manage Guild permissions to assign issues to other users or roles.');
@@ -618,7 +624,7 @@ module.exports = {
 
             const newTask = {
                 id: Date.now(),
-                jiraKey: getNextIssueKey(message.guild),
+                issueKey: getNextIssueKey(message.guild),
                 title: parsed.title,
                 description: parsed.description,
                 dueDate: parsed.dueDate,
@@ -640,12 +646,12 @@ module.exports = {
             }
 
             const status = columns.find(column => column.id === parsed.status);
-            return message.reply(`Created ${newTask.jiraKey} in ${status.name}: "${newTask.title}"`);
+            return message.reply(`Created ${newTask.issueKey} in ${status.name}: "${newTask.title}"`);
         }
 
         if (['move', 'status'].includes(subcommand)) {
             if (args.length < 2) {
-                return message.reply('Usage: `!task jira move KEY todo|doing|review|done`');
+                return message.reply('Usage: `!task move KEY todo|doing|review|done`');
             }
 
             const { task } = findTask(message, args[0]);
@@ -663,26 +669,26 @@ module.exports = {
             setTaskStatus(task, nextStatus);
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
             const status = columns.find(column => column.id === nextStatus);
-            return success ? message.reply(`Moved ${task.jiraKey || task.id} to ${status.name}.`) : message.reply('Failed to update issue.');
+            return success ? message.reply(`Moved ${getIssueKey(task) || task.id} to ${status.name}.`) : message.reply('Failed to update issue.');
         }
 
         if (['done', 'close'].includes(subcommand)) {
             if (!args[0]) {
-                return message.reply('Usage: `!task jira done KEY`');
+                return message.reply('Usage: `!task done KEY`');
             }
             return module.exports.execute(message, ['move', args[0], 'done']);
         }
 
         if (subcommand === 'reopen') {
             if (!args[0]) {
-                return message.reply('Usage: `!task jira reopen KEY`');
+                return message.reply('Usage: `!task reopen KEY`');
             }
             return module.exports.execute(message, ['move', args[0], 'todo']);
         }
 
         if (subcommand === 'claim') {
             if (!args[0]) {
-                return message.reply('Usage: `!task jira claim KEY`');
+                return message.reply('Usage: `!task claim KEY`');
             }
 
             const { task } = findTask(message, args[0]);
@@ -697,12 +703,12 @@ module.exports = {
             task.assignedToRole = null;
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
-            return success ? message.reply(`Assigned ${task.jiraKey || task.id} to you.`) : message.reply('Failed to update issue.');
+            return success ? message.reply(`Assigned ${getIssueKey(task) || task.id} to you.`) : message.reply('Failed to update issue.');
         }
 
         if (subcommand === 'assign') {
             if (args.length < 2) {
-                return message.reply('Usage: `!task jira assign KEY @user`, `!task jira assign KEY @role`, or `!task jira assign KEY none`');
+                return message.reply('Usage: `!task assign KEY @user`, `!task assign KEY @role`, or `!task assign KEY none`');
             }
 
             const { task } = findTask(message, args[0]);
@@ -738,12 +744,12 @@ module.exports = {
 
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
-            return success ? message.reply(`Updated assignee for ${task.jiraKey || task.id}: ${formatAssignee(task)}.`) : message.reply('Failed to update issue.');
+            return success ? message.reply(`Updated assignee for ${getIssueKey(task) || task.id}: ${formatAssignee(task)}.`) : message.reply('Failed to update issue.');
         }
 
         if (subcommand === 'priority') {
             if (args.length < 2) {
-                return message.reply('Usage: `!task jira priority KEY low|medium|high|urgent`');
+                return message.reply('Usage: `!task priority KEY low|medium|high|urgent`');
             }
 
             const { task } = findTask(message, args[0]);
@@ -761,12 +767,12 @@ module.exports = {
             task.priority = priority;
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
-            return success ? message.reply(`Set ${task.jiraKey || task.id} priority to ${priorities[priority].label}.`) : message.reply('Failed to update issue.');
+            return success ? message.reply(`Set ${getIssueKey(task) || task.id} priority to ${priorities[priority].label}.`) : message.reply('Failed to update issue.');
         }
 
         if (['due', 'duedate'].includes(subcommand)) {
             if (args.length < 2) {
-                return message.reply('Usage: `!task jira due KEY 2026-06-01` or `!task jira due KEY none`');
+                return message.reply('Usage: `!task due KEY 2026-06-01` or `!task due KEY none`');
             }
 
             const { task } = findTask(message, args[0]);
@@ -784,12 +790,12 @@ module.exports = {
             task.dueDate = parsed.dueDate;
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
-            return success ? message.reply(`Updated due date for ${task.jiraKey || task.id}: ${parsed.dueDate || 'none'}.`) : message.reply('Failed to update issue.');
+            return success ? message.reply(`Updated due date for ${getIssueKey(task) || task.id}: ${parsed.dueDate || 'none'}.`) : message.reply('Failed to update issue.');
         }
 
         if (['details', 'view'].includes(subcommand)) {
             if (!args[0]) {
-                return message.reply('Usage: `!task jira details KEY`');
+                return message.reply('Usage: `!task details KEY`');
             }
 
             const { tasks, task } = findTask(message, args[0]);
@@ -804,7 +810,7 @@ module.exports = {
 
         if (['edit', 'rename'].includes(subcommand)) {
             if (args.length < 2) {
-                return message.reply('Usage: `!task jira edit KEY New title`');
+                return message.reply('Usage: `!task edit KEY New title`');
             }
 
             const { task } = findTask(message, args[0]);
@@ -818,12 +824,12 @@ module.exports = {
             task.title = args.slice(1).join(' ').trim();
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
-            return success ? message.reply(`Renamed ${task.jiraKey || task.id}.`) : message.reply('Failed to update issue.');
+            return success ? message.reply(`Renamed ${getIssueKey(task) || task.id}.`) : message.reply('Failed to update issue.');
         }
 
         if (['delete', 'remove'].includes(subcommand)) {
             if (!args[0]) {
-                return message.reply('Usage: `!task jira delete KEY`');
+                return message.reply('Usage: `!task delete KEY`');
             }
 
             const { task } = findTask(message, args[0]);
@@ -835,11 +841,11 @@ module.exports = {
             }
 
             const success = message.client.taskStorage.deleteTask(message.guild.id, task.id);
-            return success ? message.reply(`Deleted ${task.jiraKey || task.id}: "${task.title}"`) : message.reply('Failed to delete issue.');
+            return success ? message.reply(`Deleted ${getIssueKey(task) || task.id}: "${task.title}"`) : message.reply('Failed to delete issue.');
         }
 
         return sendUsage(message);
     },
     generateBoardEmbed,
-    updateJiraBoard
+    updateBoard
 };

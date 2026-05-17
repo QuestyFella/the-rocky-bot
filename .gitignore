@@ -1,7 +1,5 @@
 .env
-tasks.json
-config.json
 server-tasks/server-configs/
 server-tasks/
-reminders.json
+kanbanBoards.json
 jiraBoards.json

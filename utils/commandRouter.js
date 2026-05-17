@@ -3,9 +3,31 @@ const path = require('path');
 const { Collection } = require('discord.js');
 
 const taskPrefix = '!task';
-const standalonePrefixes = {
-    '!utter': 'utter'
-};
+const kanbanSubcommands = new Set([
+    'add',
+    'assign',
+    'board',
+    'claim',
+    'close',
+    'delete',
+    'details',
+    'done',
+    'due',
+    'duedate',
+    'edit',
+    'jira',
+    'kanban',
+    'move',
+    'priority',
+    'refresh',
+    'remove',
+    'rename',
+    'reopen',
+    'setup',
+    'show',
+    'status',
+    'view'
+]);
 
 function isPrefixCommand(content, prefix) {
     return content === prefix || content.startsWith(`${prefix} `);
@@ -28,16 +50,14 @@ function registerCommand(commands, command) {
 
 function loadCommands(commandsDir) {
     const commands = new Collection();
-    const commandList = [];
     const commandFiles = fs.readdirSync(commandsDir).filter(file => file.endsWith('.js')).sort();
 
     for (const file of commandFiles) {
         const command = require(path.join(commandsDir, file));
         registerCommand(commands, command);
-        commandList.push(command);
     }
 
-    return { commands, commandList };
+    return commands;
 }
 
 function parseMessageCommand(content) {
@@ -45,18 +65,16 @@ function parseMessageCommand(content) {
 
     if (isPrefixCommand(trimmed, taskPrefix)) {
         const args = splitArgs(trimmed.slice(taskPrefix.length));
-        const commandName = (args.shift() || 'help').toLowerCase();
-        return { commandName, args, restricted: true };
-    }
-
-    for (const [prefix, commandName] of Object.entries(standalonePrefixes)) {
-        if (isPrefixCommand(trimmed, prefix)) {
+        const commandName = (args.shift() || 'board').toLowerCase();
+        if (kanbanSubcommands.has(commandName)) {
             return {
-                commandName,
-                args: splitArgs(trimmed.slice(prefix.length)),
-                restricted: false
+                commandName: 'board',
+                args: commandName === 'jira' || commandName === 'kanban' ? args : [commandName, ...args],
+                restricted: true
             };
         }
+
+        return { commandName, args, restricted: true };
     }
 
     return null;

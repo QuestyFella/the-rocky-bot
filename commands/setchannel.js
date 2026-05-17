@@ -2,14 +2,17 @@ module.exports = {
     name: 'setchannel',
     description: 'Manage channels where the bot will operate',
     execute(message, args) {
-        // Check if the user has admin permissions
         if (!message.member.permissions.has('Administrator')) {
             return message.reply('You must have administrator permissions to manage bot channels!');
         }
 
-        const subCommand = args[0] ? args[0].toLowerCase() : 'add';
+        let subCommand = args[0] ? args[0].toLowerCase() : 'add';
+        let channelArgIndex = 1;
+        if (!['add', 'remove', 'list'].includes(subCommand)) {
+            subCommand = 'add';
+            channelArgIndex = 0;
+        }
 
-        // Load and update the guild-specific configuration
         if (!message.client.serverConfigs[message.guild.id]) {
             message.client.serverConfigs[message.guild.id] = message.client.loadServerConfig(message.guild.id);
         }
@@ -27,13 +30,12 @@ module.exports = {
         }
 
         const channelMention = message.mentions.channels.first();
-        const channelId = channelMention ? channelMention.id : args[1];
+        const channelId = channelMention ? channelMention.id : args[channelArgIndex];
 
         if (!channelId) {
             return message.reply('Please mention a channel or provide a channel ID.');
         }
 
-        // Validate that the channel exists in the guild
         const channel = message.guild.channels.cache.get(channelId);
         if (!channel) {
             return message.reply('Please provide a valid channel that exists in this server!');
