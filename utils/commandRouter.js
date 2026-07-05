@@ -8,6 +8,7 @@ const kanbanSubcommands = new Set([
     'assign',
     'board',
     'claim',
+    'commands',
     'close',
     'delete',
     'details',

@@ -27,6 +27,8 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 - `!task move [key] [todo|doing|review|done]` - Move an issue between columns
 - `!task claim [key]` - Assign an issue to yourself
 - `!task done [key]` - Move an issue to Done
+- `!task reopen [key]` - Move an issue back to To Do
+- `!task refresh` - Manually refresh the live board (Manage Guild only)
 
 ### Issue Details
 
@@ -36,7 +38,32 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 - `!task due [key] [date|none]` - Set or clear a due date
 - `!task edit [key] [new title]` - Rename an issue
 - `!task delete [key]` - Delete an issue
-- `!task board` / `!task kanban` / `!task jira` - Board aliases
+
+### Aliases
+
+These run the same workflows as the commands above:
+
+- `!task board` / `!task kanban` / `!task jira` / `!task list` / `!task show` - Show the board
+- `!task status [key] [column]` - Same as `move`
+- `!task close [key]` - Same as `done`
+- `!task view [key]` - Same as `details`
+- `!task rename [key] [new title]` - Same as `edit`
+- `!task remove [key]` - Same as `delete`
+- `!task duedate [key] [date|none]` - Same as `due`
+- `!task commands` - Show the command list (same as `!task help` from the board module)
+
+Column names also accept aliases, for example `wip`, `in-progress`, `testing`, `complete`, and `closed`.
+
+### Add Options
+
+When creating an issue, you can use flags or inline options:
+
+- `!task add Fix avionics --unassigned` - Add without assigning to yourself
+- `!task add Fix avionics --desc=Details here` - Add with a description
+- `!task add Fix avionics --priority=high --status=doing` - Set priority and starting column
+- `!task add Fix avionics priority:urgent column:review` - Inline priority/column syntax
+
+Issue keys can be the project key (e.g. `QSS-1`), the internal task ID, or the issue's position on the sorted board.
 
 ### Setup
 
