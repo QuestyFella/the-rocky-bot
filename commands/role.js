@@ -29,7 +29,7 @@ module.exports = {
         const remove = args.some(a => a.toLowerCase() === 'remove');
         const includePending = args.some(a => a.toLowerCase() === 'include-pending');
         const includeBots = args.some(a => a.toLowerCase() === 'include-bots');
-        const statusMsg = await message.reply(`Working on ${remove ? 'removing' : 'adding'} **${role.name}** for everyone...`);
+        const statusMsg = await message.reply(`Fetching members for **${role.name}**...`);
         await message.guild.members.fetch();
 
         const members = message.guild.members.cache.filter(member =>
@@ -38,8 +38,16 @@ module.exports = {
         const skippedPending = remove || includePending ? 0 : message.guild.members.cache.filter(member => member.pending === true).size;
         const skippedBots = remove || includeBots ? 0 : message.guild.members.cache.filter(member => member.user.bot).size;
 
+        const targets = members.filter(member => remove ? member.roles.cache.has(role.id) : !member.roles.cache.has(role.id));
+        const unchanged = members.size - targets.size;
+
+        if (targets.size === 0) {
+            return statusMsg.edit(`Done. Nobody needed changes (${unchanged} already correct).`);
+        }
+
+        await statusMsg.edit(`Working on ${remove ? 'removing' : 'adding'} **${role.name}** for ${targets.size} member(s)...`);
         const results = await Promise.allSettled(
-            members.map(member =>
+            targets.map(member =>
                 remove ? member.roles.remove(role, `Mass ${remove ? 'remove' : 'assign'} by ${message.author.tag}`)
                        : member.roles.add(role, `Mass ${remove ? 'remove' : 'assign'} by ${message.author.tag}`)
             )
@@ -50,6 +58,6 @@ module.exports = {
             skippedPending ? `${skippedPending} pending/unverified skipped` : '',
             skippedBots ? `${skippedBots} bots skipped` : ''
         ].filter(Boolean).join(', ');
-        return statusMsg.edit(`Done. ${ok} updated, ${failed} failed${skipped ? `, ${skipped}` : ''}.`);
+        return statusMsg.edit(`Done. ${ok} updated, ${failed} failed, ${unchanged} already correct${skipped ? `, ${skipped}` : ''}.`);
     }
 };

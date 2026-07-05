@@ -21,26 +21,27 @@ module.exports = {
         if (sub === 'status') {
             const v = serverConfig.verification;
             if (!v || !v.channelId) {
-                return message.reply('Verification is not set up. Use `!task verify setup #channel @Role`.');
+                return message.reply('Verification is not set up. Use `!task verify setup #channel @Role` or `!task verify setup <channelID> <roleID>`.');
             }
             const pending = message.client.pendingVerifications.size;
             return message.reply(`Verification → channel: <#${v.channelId}>, role: <@&${v.roleId}>. Random emoji per join. ${pending} pending prompt(s).`);
         }
 
         if (sub === 'setup') {
-            const channel = message.mentions.channels.first();
-            const role = message.mentions.roles.first();
+            const ids = args.filter(a => /^\d{17,20}$/.test(a));
+            const channel = message.mentions.channels.first() || message.guild.channels.cache.get(ids[0]);
+            const role = message.mentions.roles.first() || message.guild.roles.cache.get(ids[1] || ids[0]);
             if (!channel || !role) {
-                return message.reply('Usage: `!task verify setup #channel @Role`. The bot asks each new member to type a random emoji.');
+                return message.reply('Usage: `!task verify setup #channel @Role` or `!task verify setup <channelID> <roleID>`. The bot asks each new member to type a random emoji.');
             }
             if (message.guild.members.me.roles.highest.position <= role.position) {
                 return message.reply(`My highest role must be above **${role.name}** to grant it.`);
             }
             serverConfig.verification = { channelId: channel.id, roleId: role.id };
             message.client.saveServerConfig(message.guild.id, serverConfig);
-            return message.reply(`Verification configured. New members get a random emoji prompt in ${channel}; they reply with that emoji to get <@&${role.id}>.`);
+            return message.reply(`Verification configured. New members get a random emoji prompt in <#${channel.id}>; they reply with that emoji to get **${role.name}**.`);
         }
 
-        return message.reply('Usage: `!task verify setup #channel @Role`, `!task verify status`, or `!task verify off`.');
+        return message.reply('Usage: `!task verify setup #channel @Role`, `!task verify setup <channelID> <roleID>`, `!task verify status`, or `!task verify off`.');
     }
 };

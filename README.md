@@ -43,7 +43,7 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 - `!task setchannel [add|remove|list] [#channel]` - Manage channels where the bot operates
 - `!task role all @Role` - Mass-assign a role to non-pending, non-bot members in the server (Manage Roles)
 - `!task role all @Role remove` - Mass-remove a role from everyone
-- `!task verify setup #channel @Role` - Set up emoji-type verification for new members (Manage Server)
+- `!task verify setup #channel @Role` / `!task verify setup <channelID> <roleID>` - Set up emoji-type verification for new members (Manage Server)
 - `!task verify status` - Show current verification config and pending prompts
 - `!task verify off` - Disable verification
 - `!task help` - Show help message
