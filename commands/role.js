@@ -11,9 +11,13 @@ module.exports = {
             return message.reply('I am missing the Manage Roles permission.');
         }
 
-        const role = message.mentions.roles.first();
+        let role = message.mentions.roles.first();
         if (!role) {
-            return message.reply('Usage: `!task role all @Role` or `!task role all @Role remove`.');
+            const idArg = args.find(a => /^\d{17,20}$/.test(a));
+            role = idArg ? message.guild.roles.cache.get(idArg) : null;
+        }
+        if (!role) {
+            return message.reply('Usage: `!task role all @Role` or `!task role all <roleID> [remove]`.');
         }
         if ((args[0] || '').toLowerCase() !== 'all') {
             return message.reply('Only `all` is supported right now. Usage: `!task role all @Role [remove]`.');
