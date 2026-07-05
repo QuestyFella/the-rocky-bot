@@ -59,7 +59,7 @@ function getCachedServerConfig(client, guildId) {
 }
 
 function canRunInChannel(config, channelId, commandName) {
-    if (commandName === 'setchannel') {
+    if (commandName === 'setchannel' || commandName === 'verify' || commandName === 'role') {
         return true;
     }
 
