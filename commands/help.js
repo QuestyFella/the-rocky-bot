@@ -36,7 +36,7 @@ module.exports = {
                     value: [
                         '`!task setchannel add #channel` - Restrict bot commands to a channel.',
                         '`!task setchannel list` - Show allowed channels.',
-                        '`!task role all @Role [remove]` - Mass add (or remove) a role for everyone.',
+                        '`!task role all @Role [remove]` - Mass add/remove a role; add skips pending members and bots.',
                         '`!task verify setup #channel @Role` - New members type a random emoji to verify (stops bots).',
                         '`!task verify status` / `!task verify off` - Check or disable verification.',
                         '`!task board`, `!task kanban`, and `!task jira` still work as aliases.'
