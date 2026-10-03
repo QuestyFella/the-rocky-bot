@@ -1,12 +1,14 @@
 const { isManager } = require('../utils/kanban');
-const { buildTeamSetup } = require('../utils/boardComponents');
+const { buildTeamSetup, buildTeamPicker } = require('../utils/boardComponents');
 
 module.exports = {
     name: 'teams',
-    description: 'Choose Discord roles to use as Kanban teams',
-    async execute(message) {
-        if (!isManager(message)) return message.reply('Use My Teams on the board or `!task myteams` to see your teams’ tasks. A server manager can use Setup Teams to configure team roles.');
-        await message.guild.roles.fetch();
-        return message.channel.send(buildTeamSetup(message));
+    description: 'Browse team tasks or set up group labels',
+    async execute(message, args = []) {
+        if (args[0]?.toLowerCase() === 'setup') {
+            if (!isManager(message)) return message.reply('You need Manage Server permission to set up teams.');
+            return message.channel.send(buildTeamSetup(message));
+        }
+        return message.channel.send(buildTeamPicker(message.client.taskStorage.getAllTasks(message.guild.id), message));
     }
 };

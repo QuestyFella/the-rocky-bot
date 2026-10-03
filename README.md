@@ -8,7 +8,7 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 - Buttons, task pickers, and an Add Task form
 - Claim, Start Work, Release, and status changes without typing commands
 - Available Tasks and My Tasks views, with pagination for larger boards
-- Team tags that stay with tasks after assignment, plus a My Teams view based on Discord roles
+- Visible team labels that stay with tasks after assignment, plus a Team Tasks picker for any group
 - To Do, In Progress, Review, and Done columns
 - Short issue keys
 - Issue assignment to users or roles
@@ -26,23 +26,23 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 
 Run `!task` (or ask a server manager to run `!task setup` once for a live board).
 
-1. Click **Add Task** to enter a title, description, priority, optional due date, and team. New tasks are unassigned.
+1. Anyone can click **Add Task** to enter a title, description, priority, optional due date, and team. New tasks are unassigned.
 2. Click **Available Tasks**, choose a task, and click **Claim** to assign yourself. **Start Work** also moves it to In Progress.
 3. Click **My Tasks** to see your active work. Choose a task and use its status dropdown to move it to Review or Done.
 4. Click **Release** to return your task to To Do for someone else to claim.
-5. Click **My Teams** to see active tasks tagged for any of your Discord team roles, including tasks claimed by teammates.
+5. Click **Team Tasks**, choose a group, and see its active tasks, including tasks claimed by teammates.
 
 Task pickers and task controls opened from the board are visible only to the person who clicked. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim.
 
 ### Setting up teams
 
-1. Create your team roles in Discord if needed (for example, Avionics, Software, and Mechanical), and assign members to those roles.
-2. A member with **Manage Server** permission opens `!task`, clicks **Setup Teams**, and selects the team roles. The selection saves immediately. `!task teams` opens the same setup picker.
+1. A member with **Manage Server** permission opens `!task`, clicks **Setup Teams**, then **Edit Teams**. `!task teams setup` opens the same setup controls.
+2. Enter one group name per line (for example, Avionics, Software, and Mechanical), then submit the form.
 3. **Add Task** now includes a team dropdown. Existing tasks have a **Change team tag** dropdown for their creator, assignee, or a server manager.
 
-Each task has one optional team tag, shown on the board and in its details. Team tags are independent of personal assignment: claiming, starting, releasing, or reassigning a task keeps its team tag. Members of several teams see all their teams’ active tasks under **My Teams**. Tags organize work; the existing task permissions still control who can edit or claim it.
+Each task has one optional team label, shown on the board, in task pickers, and in its details. It indicates which group the task is meant for. Teams need no Discord roles or membership setup; anyone can browse any team. Claiming, starting, releasing, or reassigning a task keeps its label. A label allows any member to claim an available task; existing ownership and explicit role-assignment permissions still apply.
 
-Older role-assigned tasks also appear under **My Teams**, and their team tag is retained when someone claims them. Removing a role from team setup keeps existing tags. Select **No team** on a task to clear its tag. Team setup supports up to 24 roles per server.
+Older team tags and role-assigned tasks remain visible in **Team Tasks**, and their label is retained when someone claims them. Removing a team from setup keeps existing task labels and their browse view. Select **No team** on a task to clear its label. Team setup supports up to 24 names per server, each up to 50 characters. Reordering names keeps their task links; changing a name creates a new team, while the previous name remains on existing tasks.
 
 ### Core Flow
 
@@ -55,7 +55,7 @@ Older role-assigned tasks also appear under **My Teams**, and their team tag is 
 - `!task start [key]` - Claim and move an issue to In Progress
 - `!task release [key]` / `!task unclaim [key]` - Return your issue to To Do
 - `!task available` / `!task mine` - Browse available issues or your active work
-- `!task myteams` - Browse active issues tagged for your teams
+- `!task teams` / `!task teamtasks` / `!task myteams` - Choose a team and browse its active issues
 - `!task done [key]` - Move an issue to Done
 - `!task reopen [key]` - Move an issue back to To Do
 - `!task refresh` - Manually refresh the live board (Manage Guild only)
@@ -64,7 +64,7 @@ Older role-assigned tasks also appear under **My Teams**, and their team tag is 
 
 - `!task details [key]` - Show one issue as an embed
 - `!task assign [key] @user|@role|none` - Change issue assignee
-- `!task team [key] @TeamRole|none` - Set or clear the team tag
+- `!task team [key] Team Name|none` - Set or clear the team label (names can contain spaces)
 - `!task priority [key] [low|medium|high|urgent]` - Set issue priority
 - `!task due [key] [date|none]` - Set or clear a due date
 - `!task edit [key] [new title]` - Rename an issue
@@ -100,7 +100,7 @@ Issue keys can be the project key (e.g. `QSS-1`), the internal task ID, or the i
 ### Setup
 
 - `!task setchannel [add|remove|list] [#channel]` - Manage channels where the bot operates
-- `!task teams` - Pick Discord roles to use as teams (Manage Server)
+- `!task teams setup` - Enter group names to use as team labels (Manage Server)
 - `!task role all @Role` - Mass-assign a role to non-pending, non-bot members in the server (Manage Roles)
 - `!task role all @Role remove` - Mass-remove a role from everyone
 - `!task verify setup #channel @Role` / `!task verify setup <channelID> <roleID>` - Set up emoji-type verification for new members (Manage Server)

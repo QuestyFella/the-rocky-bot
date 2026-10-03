@@ -11,6 +11,7 @@ const kanbanSubcommands = new Set([
     'available',
     'mine',
     'myteams',
+    'teamtasks',
     'team',
     'release',
     'unclaim',

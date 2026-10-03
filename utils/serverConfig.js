@@ -13,8 +13,6 @@ function normalizeConfig(config = {}) {
     if (!Array.isArray(config.allowedChannelIds)) {
         config.allowedChannelIds = [];
     }
-    if (!Array.isArray(config.teamRoleIds)) config.teamRoleIds = [];
-
     return config;
 }
 

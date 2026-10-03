@@ -10,10 +10,11 @@ process.env.BOT_DATA_DIR = temporaryDir;
 const TaskStorage = require('../taskStorage');
 const board = require('../commands/board');
 const { handleBoardInteraction } = require('../utils/boardInteractions');
-const { buildTaskPicker, buildIssueComponents, buildBoardComponents, buildAddModal, buildTeamSetup, filterTasks } = require('../utils/boardComponents');
-const { claimError, releaseError, getTaskStatus, getTaskTeamRoleId } = require('../utils/kanban');
-const { getConfiguredTeams, saveTeams, validateTeam, maxTeams } = require('../utils/teams');
+const { buildTaskPicker, buildIssueComponents, buildBoardComponents, buildAddModal, buildTeamSetup, buildTeamSetupModal, buildTeamPicker, filterTasks } = require('../utils/boardComponents');
+const { claimError, releaseError, getTaskStatus } = require('../utils/kanban');
+const { getConfiguredTeams, saveTeams, validateTeam, getTaskTeam, listTaskTeams, setTaskTeam, maxTeams, maxTeamNameLength } = require('../utils/teams');
 const { loadServerConfig } = require('../utils/serverConfig');
+const teamsCommand = require('../commands/teams');
 const { parseMessageCommand } = require('../utils/commandRouter');
 test.after(() => fs.rmSync(temporaryDir, { recursive: true, force: true }));
 let fixtureNumber = 0;
@@ -29,7 +30,7 @@ function fixture({ userId = 'alice', roles = [], manager = false, privateMessage
     client.taskStorage.addTask(guild.id, task);
     const responses = [];
     const interaction = {
-        customId: 'kanban:claim:stable-task', guildId: guild.id, channelId: 'channel', guild, client, user: actor.author,
+        customId: 'kanban:claim:stable-task', guildId: guild.id, channelId: 'channel', guild, client, user: actor.author, memberPermissions: member.permissions,
         message: { flags: { has: flag => privateMessage && flag === MessageFlags.Ephemeral }, edit: async payload => responses.push(['messageEdit', payload]) },
         inGuild: () => true, isButton: () => true, isStringSelectMenu: () => false, isRoleSelectMenu: () => false, isModalSubmit: () => false,
         deferReply: async payload => responses.push(['deferReply', payload]), deferUpdate: async () => responses.push(['deferUpdate']),
@@ -181,156 +182,189 @@ test('storage copies prevent mutations and failed writes from changing cached ow
 });
 
 test('new text commands route to the Kanban module', () => {
-    for (const command of ['mine', 'available', 'myteams', 'team', 'start', 'release', 'unclaim']) {
+    for (const command of ['mine', 'available', 'myteams', 'teamtasks', 'team', 'start', 'release', 'unclaim']) {
         assert.deepEqual(parseMessageCommand(`!task ${command} RC-1`), { commandName: 'board', args: [command, 'RC-1'], restricted: true });
     }
 });
 
-const avionicsId = '111111111111111111';
-const softwareId = '222222222222222222';
-function configureTeams(f, ids = [avionicsId, softwareId]) {
-    for (const id of ids) f.guild.roles.cache.set(id, { id, name: id === avionicsId ? 'Avionics' : 'Software', managed: false });
-    assert.equal(saveTeams(f.actor, ids), null);
+function configureTeams(f, names = ['Avionics', 'Software']) {
+    assert.equal(saveTeams(f.actor, names), null);
+    return getConfiguredTeams(f.actor);
 }
 
-test('Setup Teams uses a role picker and only server managers can save or clear it', async () => {
+function tagged(task, team) {
+    const copy = { ...task };
+    setTaskTeam(copy, team);
+    return copy;
+}
+
+test('Setup Teams uses a names form and checks manager permissions on opening and submitting', async () => {
     const f = fixture();
-    f.guild.roles.cache.set(avionicsId, { id: avionicsId, name: 'Avionics', managed: false });
-    f.interaction.customId = 'kanban:teamsetup:save';
-    f.interaction.values = [avionicsId];
+    f.interaction.customId = 'kanban:teamsetup:edit';
+    await handleBoardInteraction(f.interaction);
+    assert.match(f.responses.at(-1)[1].content, /Manage Server/);
+    f.actor.member.permissions.has = () => true;
+    await handleBoardInteraction(f.interaction);
+    const modal = f.responses.at(-1)[1].toJSON();
+    assert.equal(modal.components[0].component.type, 4);
+    f.interaction.customId = modal.custom_id;
     f.interaction.isButton = () => false;
-    f.interaction.isRoleSelectMenu = () => true;
+    f.interaction.isModalSubmit = () => true;
+    f.interaction.fields = { getTextInputValue: () => 'Avionics\nSoftware\n\n' };
+    f.actor.member.permissions.has = () => false;
     await handleBoardInteraction(f.interaction);
     assert.match(f.responses.at(-1)[1].content, /Manage Server/);
     assert.equal(getConfiguredTeams(f.actor).length, 0);
     f.actor.member.permissions.has = () => true;
     await handleBoardInteraction(f.interaction);
-    assert.deepEqual(getConfiguredTeams(f.actor).map(role => role.id), [avionicsId]);
-    const setup = f.responses.at(-1)[1];
-    assert.equal(setup.components[0].toJSON().components[0].type, 6);
-    assert.equal(setup.components[0].toJSON().components[0].default_values[0].id, avionicsId);
+    assert.deepEqual(getConfiguredTeams(f.actor).map(team => team.name), ['Avionics', 'Software']);
+    assert.match(buildTeamSetupModal(f.actor).toJSON().components[0].component.value, /Avionics\nSoftware/);
     f.interaction.customId = 'kanban:teamsetup:clear';
+    f.actor.member.permissions.has = () => false;
+    await handleBoardInteraction(f.interaction);
+    assert.match(f.responses.at(-1)[1].content, /Manage Server/);
+    assert.equal(getConfiguredTeams(f.actor).length, 2);
+    f.actor.member.permissions.has = () => true;
     await handleBoardInteraction(f.interaction);
     assert.equal(getConfiguredTeams(f.actor).length, 0);
     assert.match(f.responses.at(-1)[1].content, /cleared/);
 });
 
-test('team setup is persistent and separate for each server and rejects invalid roles', () => {
+test('team names persist separately for each server without roles; validation and reordering keep IDs', () => {
     const a = fixture();
     const b = fixture();
-    configureTeams(a, [avionicsId]);
-    configureTeams(b, [softwareId]);
+    const [avionics, software] = configureTeams(a);
+    configureTeams(b, ['Mechanical']);
     a.client.serverConfigs = {};
     b.client.serverConfigs = {};
-    assert.deepEqual(getConfiguredTeams(a.actor).map(role => role.id), [avionicsId]);
-    assert.deepEqual(getConfiguredTeams(b.actor).map(role => role.id), [softwareId]);
-    assert.ok(saveTeams(a.actor, [softwareId]));
-    a.guild.roles.cache.set(a.guild.id, { id: a.guild.id, managed: false });
-    assert.ok(saveTeams(a.actor, [a.guild.id]));
-    a.guild.roles.cache.set('bot-role', { id: 'bot-role', managed: true });
-    assert.ok(saveTeams(a.actor, ['bot-role']));
-    assert.ok(saveTeams(a.actor, Array.from({ length: maxTeams + 1 }, (_, i) => String(i))));
-    assert.deepEqual(loadServerConfig(a.guild.id).teamRoleIds, [avionicsId]);
-    a.guild.roles.cache.delete(avionicsId);
-    assert.equal(getConfiguredTeams(a.actor).length, 0);
-    assert.ok(validateTeam(a.actor, avionicsId));
+    assert.deepEqual(getConfiguredTeams(a.actor).map(team => team.name), ['Avionics', 'Software']);
+    assert.deepEqual(getConfiguredTeams(b.actor).map(team => team.name), ['Mechanical']);
+    assert.equal(validateTeam(b.actor, avionics.id)?.includes('no longer set up'), true);
+    assert.equal(saveTeams(a.actor, ['Software', 'Avionics', 'avionics', ' ']), null);
+    assert.deepEqual(getConfiguredTeams(a.actor).map(team => team.id), [software.id, avionics.id]);
+    assert.ok(saveTeams(a.actor, ['x'.repeat(maxTeamNameLength + 1)]));
+    assert.ok(saveTeams(a.actor, ['line\nbreak']));
+    assert.ok(saveTeams(a.actor, Array.from({ length: maxTeams + 1 }, (_, i) => `Team ${i}`)));
+    assert.ok(saveTeams(a.actor, [null]));
+    assert.deepEqual(loadServerConfig(a.guild.id).teams.map(team => team.id), [software.id, avionics.id]);
+    assert.equal(a.guild.roles.cache.size, 0);
 });
 
 test('a failed team setup write preserves the previous configuration and disk file', () => {
     const f = fixture();
-    configureTeams(f, [avionicsId]);
-    f.guild.roles.cache.set(softwareId, { id: softwareId, name: 'Software', managed: false });
+    const [avionics] = configureTeams(f, ['Avionics']);
     const rename = fs.renameSync;
     const logError = console.error;
     try {
         fs.renameSync = () => { throw new Error('simulated disk failure'); };
         console.error = () => {};
-        assert.ok(saveTeams(f.actor, [softwareId]));
+        assert.ok(saveTeams(f.actor, ['Software']));
     } finally {
         fs.renameSync = rename;
         console.error = logError;
     }
-    assert.deepEqual(getConfiguredTeams(f.actor).map(role => role.id), [avionicsId]);
-    assert.deepEqual(loadServerConfig(f.guild.id).teamRoleIds, [avionicsId]);
+    assert.deepEqual(getConfiguredTeams(f.actor), [avionics]);
+    assert.deepEqual(loadServerConfig(f.guild.id).teams, [avionics]);
 });
 
-test('My Teams includes active tasks across all member teams, including claimed and legacy role tasks', async () => {
-    const f = fixture({ roles: [avionicsId, softwareId] });
-    configureTeams(f);
+test('any member can choose a team and browse its active tasks, with no role or membership requirement', async () => {
+    const f = fixture();
+    const [avionics, software] = configureTeams(f);
     const tasks = [
-        { ...f.task, id: 'avionics', teamRoleId: avionicsId },
-        { ...f.task, id: 'software', teamRoleId: softwareId, userId: 'someone-else' },
-        { ...f.task, id: 'legacy', assignedToRole: avionicsId },
-        { ...f.task, id: 'done', teamRoleId: avionicsId, completed: true },
-        { ...f.task, id: 'other', teamRoleId: 'other-team' },
-        { ...f.task, id: 'cleared', assignedToRole: avionicsId, teamRoleId: null },
+        tagged({ ...f.task, id: 'avionics' }, avionics),
+        tagged({ ...f.task, id: 'claimed', userId: 'someone-else' }, avionics),
+        tagged({ ...f.task, id: 'software' }, software),
+        tagged({ ...f.task, id: 'done', completed: true }, avionics),
         { ...f.task, id: 'untagged' }
     ];
-    assert.deepEqual(filterTasks(tasks, 'teams', f.actor).map(task => task.id), ['avionics', 'software', 'legacy']);
+    assert.deepEqual(filterTasks(tasks, 'teams', f.actor, avionics.id).map(task => task.id), ['avionics', 'claimed']);
     f.client.taskStorage.saveTasks(f.guild.id, tasks);
     f.interaction.customId = 'kanban:list:teams:0';
     await handleBoardInteraction(f.interaction);
-    const payload = f.responses.at(-1)[1];
-    assert.match(payload.content, /My Teams.*3 task/);
-    const options = payload.components[0].toJSON().components[0].options;
-    assert.ok(options.some(option => option.description.includes('Avionics')));
-    assert.ok(options.some(option => option.description.includes('Software')));
-});
-
-test('new and legacy team tags survive claiming, status updates, release, and user reassignment', async () => {
-    for (const legacy of [true, false]) {
-        const f = fixture({ roles: [avionicsId], manager: true });
-        configureTeams(f, [avionicsId]);
-        const task = { ...f.task, ...(legacy ? { assignedToRole: avionicsId } : { teamRoleId: avionicsId }) };
-        f.client.taskStorage.updateTask(f.guild.id, task.id, task);
-        for (const action of ['claim', 'start', 'status', 'release']) {
-            f.interaction.customId = `kanban:${action}:${task.id}`;
-            f.interaction.values = ['review'];
-            await handleBoardInteraction(f.interaction);
-            assert.equal(getTaskTeamRoleId(f.client.taskStorage.getAllTasks(f.guild.id)[0]), avionicsId);
-        }
-        const message = { ...f.actor, mentions: { users: { first: () => ({ id: 'bob' }) }, roles: { first: () => null } }, reply: async () => {} };
-        await board.execute(message, ['assign', task.issueKey, '<@bob>']);
-        const saved = f.client.taskStorage.getAllTasks(f.guild.id)[0];
-        assert.equal(saved.userId, 'bob');
-        assert.equal(saved.teamRoleId, avionicsId);
-    }
-});
-
-test('team tags can be edited or cleared independently of the assignee, with permission checks', async () => {
-    const f = fixture();
-    configureTeams(f);
-    const task = { ...f.task, userId: 'alice', teamRoleId: avionicsId };
-    f.client.taskStorage.updateTask(f.guild.id, task.id, task);
-    f.interaction.customId = 'kanban:team:stable-task';
-    f.interaction.values = [softwareId];
+    let payload = f.responses.at(-1)[1];
+    assert.match(payload.content, /Anyone can view any team/);
+    assert.equal(payload.components[0].toJSON().components[0].options.length, 2);
+    f.interaction.customId = 'kanban:teamview';
+    f.interaction.values = [avionics.id];
     await handleBoardInteraction(f.interaction);
-    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamRoleId, softwareId);
+    payload = f.responses.at(-1)[1];
+    assert.match(payload.content, /Team Tasks: Avionics.*2 task/);
+    assert.deepEqual(payload.components[0].toJSON().components[0].options.map(option => option.value), ['avionics', 'claimed']);
+    assert.ok(payload.components[0].toJSON().components[0].options.every(option => option.description.includes('Avionics')));
+    assert.equal(claimError(f.actor, tasks[0]), null);
+    assert.ok(claimError(f.actor, tasks[1]));
+    assert.equal(f.actor.member.roles.cache.size, 0);
+    f.interaction.values = ['foreign-team'];
+    await handleBoardInteraction(f.interaction);
+    assert.equal(f.responses.at(-1)[1].components[0].toJSON().components[0].custom_id, 'kanban:teamview');
+});
+
+test('team labels survive claiming, status updates, release, and user reassignment', async () => {
+    const f = fixture({ manager: true });
+    const [avionics] = configureTeams(f, ['Avionics']);
+    f.client.taskStorage.updateTask(f.guild.id, f.task.id, tagged(f.task, avionics));
+    for (const action of ['claim', 'start', 'status', 'release']) {
+        f.interaction.customId = `kanban:${action}:${f.task.id}`;
+        f.interaction.values = ['review'];
+        await handleBoardInteraction(f.interaction);
+        assert.deepEqual(getTaskTeam(f.client.taskStorage.getAllTasks(f.guild.id)[0]), avionics);
+    }
+    const message = { ...f.actor, mentions: { users: { first: () => ({ id: 'bob' }) }, roles: { first: () => null } }, reply: async () => {} };
+    await board.execute(message, ['assign', f.task.issueKey, '<@bob>']);
+    const saved = f.client.taskStorage.getAllTasks(f.guild.id)[0];
+    assert.equal(saved.userId, 'bob');
+    assert.deepEqual(getTaskTeam(saved), avionics);
+});
+
+test('removing a team keeps task labels and browsing; restoring its name keeps existing task links', async () => {
+    const f = fixture();
+    const [avionics] = configureTeams(f, ['Avionics']);
+    const task = tagged(f.task, avionics);
+    f.client.taskStorage.updateTask(f.guild.id, task.id, task);
+    saveTeams(f.actor, []);
+    assert.deepEqual(listTaskTeams([task], f.actor), [avionics]);
+    assert.match(board.buildIssueEmbed(task, 0, f.actor).toJSON().fields.find(field => field.name === 'Team').value, /Avionics/);
+    f.interaction.customId = 'kanban:teamview';
+    f.interaction.values = [avionics.id];
+    await handleBoardInteraction(f.interaction);
+    assert.match(f.responses.at(-1)[1].content, /Avionics.*1 task/);
+    saveTeams(f.actor, ['Avionics']);
+    assert.deepEqual(getConfiguredTeams(f.actor), [avionics]);
+});
+
+test('team labels can be edited or cleared independently of the assignee, with permission checks', async () => {
+    const f = fixture();
+    const [avionics, software] = configureTeams(f);
+    f.client.taskStorage.updateTask(f.guild.id, f.task.id, tagged({ ...f.task, userId: 'alice' }, avionics));
+    f.interaction.customId = 'kanban:team:stable-task';
+    f.interaction.values = [software.id];
+    await handleBoardInteraction(f.interaction);
+    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamId, software.id);
     assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].userId, 'alice');
     f.interaction.values = ['foreign-team'];
     await handleBoardInteraction(f.interaction);
     assert.match(f.responses.at(-1)[1].content, /no longer set up/);
-    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamRoleId, softwareId);
+    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamId, software.id);
     f.interaction.values = ['none'];
     await handleBoardInteraction(f.interaction);
-    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamRoleId, null);
+    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamId, null);
     f.interaction.user = { id: 'stranger' };
-    f.interaction.values = [avionicsId];
+    f.interaction.values = [avionics.id];
     await handleBoardInteraction(f.interaction);
     assert.match(f.responses.at(-1)[1].content, /permission/);
-    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamRoleId, null);
+    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamId, null);
 });
 
-test('native Add Task modal selects a team, persists it, and rejects a team removed while the form is open', async () => {
+test('a regular member can use the native Add Task modal, select a visible team, and submit without roles', async () => {
     const f = fixture();
-    configureTeams(f);
+    const [avionics, software] = configureTeams(f);
     f.interaction.customId = 'kanban:add';
     await handleBoardInteraction(f.interaction);
     const modal = f.responses.at(-1)[1].toJSON();
     assert.equal(modal.components.length, 5);
     const components = modal.components.map(label => ({ ...label, component: label.component.type === 4
         ? { ...label.component, value: { title: 'Team task', description: 'Build flight software', priority: 'high', due: '' }[label.component.custom_id] }
-        : { ...label.component, values: [softwareId] } }));
+        : { ...label.component, values: [software.id] } }));
     f.interaction.fields = new ModalSubmitFields(components.map(component => ModalSubmitInteraction.transformComponent(component)));
     f.interaction.customId = 'kanban:create';
     f.interaction.isButton = () => false;
@@ -338,58 +372,107 @@ test('native Add Task modal selects a team, persists it, and rejects a team remo
     await handleBoardInteraction(f.interaction);
     const created = f.client.taskStorage.getAllTasks(f.guild.id).at(-1);
     assert.equal(created.title, 'Team task');
-    assert.equal(created.teamRoleId, softwareId);
+    assert.equal(created.teamId, software.id);
+    assert.equal(created.teamName, 'Software');
     assert.equal(created.userId, null);
-    saveTeams(f.actor, [avionicsId]);
+    assert.equal(created.assignedToRole, null);
+    assert.match(f.responses.at(-1)[1].embeds[0].toJSON().fields.find(field => field.name === 'Team').value, /Software/);
+    saveTeams(f.actor, [avionics.name]);
     await handleBoardInteraction(f.interaction);
     assert.match(f.responses.at(-1)[1].content, /no longer set up/);
     assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).length, 2);
     components.at(-1).component.values = [];
     f.interaction.fields = new ModalSubmitFields(components.map(component => ModalSubmitInteraction.transformComponent(component)));
     await handleBoardInteraction(f.interaction);
-    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).at(-1).teamRoleId, null);
+    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).at(-1).teamId, null);
 });
 
-test('team forms, pickers, task controls, and setup stay within Discord component limits', () => {
+test('regular members can create tasks through text commands and team labels accept names with spaces', async () => {
     const f = fixture();
-    const roleIds = Array.from({ length: maxTeams }, (_, i) => String(BigInt(avionicsId) + BigInt(i)));
-    configureTeams(f, roleIds);
-    const teams = getConfiguredTeams(f.actor);
-    const modal = buildAddModal(teams).toJSON();
-    assert.equal(modal.components.length, 5);
-    assert.equal(modal.components.at(-1).component.options.length, 25);
-    const issue = buildIssueComponents({ ...f.task, userId: 'alice', teamRoleId: avionicsId }, f.actor).map(row => row.toJSON());
+    const [team] = configureTeams(f, ['Flight Software']);
+    const replies = [];
+    const message = { ...f.actor, mentions: { users: { first: () => null }, roles: { first: () => null } }, reply: async content => replies.push(content) };
+    await board.execute(message, ['add', 'New', 'task']);
+    const created = f.client.taskStorage.getAllTasks(f.guild.id).at(-1);
+    assert.equal(created.createdBy, 'alice');
+    await board.execute(message, ['team', created.id, 'flight', 'software']);
+    const saved = f.client.taskStorage.getAllTasks(f.guild.id).at(-1);
+    assert.equal(saved.teamId, team.id);
+    assert.equal(board.buildIssueEmbed(saved, 0, f.actor).toJSON().fields.find(field => field.name === 'Team').value, 'Flight Software');
+    assert.ok(board.generateBoardEmbed(f.client, f.guild.id).toJSON().fields.some(field => field.value.includes('Team: Flight Software')));
+    await board.execute(message, ['team', created.id, 'none']);
+    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).at(-1).teamId, null);
+    assert.equal(replies.length, 3);
+});
+
+test('team forms and controls fit Discord limits, and pagination preserves the selected team', async () => {
+    const f = fixture();
+    const teams = configureTeams(f, Array.from({ length: maxTeams }, (_, i) => `Team ${i}`));
+    assert.equal(buildAddModal(teams).toJSON().components.at(-1).component.options.length, 25);
+    const issue = buildIssueComponents(tagged({ ...f.task, userId: 'alice' }, teams[0]), f.actor).map(row => row.toJSON());
     assert.ok(issue.length <= 5);
     assert.equal(issue.at(-1).components[0].options.length, 25);
-    assert.equal(buildTeamSetup(f.actor).components[0].toJSON().components[0].max_values, 24);
-    for (const row of buildBoardComponents()) assert.ok(row.toJSON().components.length <= 5);
-    const tasks = Array.from({ length: 61 }, (_, i) => ({ ...f.task, id: String(i), teamRoleId: avionicsId }));
-    const page = buildTaskPicker(tasks, 'teams', 2, f.actor);
-    assert.match(page.content, /Page 3\/3/);
-    assert.match(page.components[1].toJSON().components[0].custom_id, /list:teams:1/);
+    for (const row of [...buildBoardComponents(), ...buildTeamSetup(f.actor).components]) assert.ok(row.toJSON().components.length <= 5);
+    const tasks = Array.from({ length: 61 }, (_, i) => tagged({ ...f.task, id: String(i) }, teams[0]));
+    tasks.push(tagged({ ...f.task, id: 'other' }, teams[1]));
+    f.client.taskStorage.saveTasks(f.guild.id, tasks);
+    f.interaction.customId = `kanban:list:teams:2:${teams[0].id}`;
+    await handleBoardInteraction(f.interaction);
+    const page = f.responses.at(-1)[1];
+    assert.match(page.content, /Team 0.*61 task.*Page 3\/3/);
+    assert.equal(page.components[1].toJSON().components[0].custom_id, `kanban:list:teams:1:${teams[0].id}`);
     assert.equal(page.components[0].toJSON().components[0].options.length, 11);
+    const oldTeams = Array.from({ length: 61 }, (_, i) => ({ ...f.task, id: `old-${i}`, teamId: `old-team-${i}`, teamName: `Old Team ${i}` }));
+    saveTeams(f.actor, []);
+    const seen = [];
+    for (let i = 0; i < 3; i++) seen.push(...buildTeamPicker(oldTeams, f.actor, i).components[0].toJSON().components[0].options.map(option => option.value));
+    assert.equal(new Set(seen).size, 61);
 });
 
-test('team tags appear on the board and detail embeds and text commands can tag existing tasks', async () => {
-    const f = fixture({ manager: true });
-    configureTeams(f, [avionicsId]);
-    const message = { ...f.actor, mentions: { roles: { first: () => f.guild.roles.cache.get(avionicsId) } }, reply: async () => {} };
-    await board.execute(message, ['team', f.task.issueKey, `<@&${avionicsId}>`]);
-    const task = f.client.taskStorage.getAllTasks(f.guild.id)[0];
-    assert.equal(task.teamRoleId, avionicsId);
-    assert.equal(task.userId, null);
-    assert.equal(board.buildIssueEmbed(task, 0).toJSON().fields.find(field => field.name === 'Team').value, `<@&${avionicsId}>`);
-    assert.ok(board.generateBoardEmbed(f.client, f.guild.id).toJSON().fields.some(field => field.value.includes(`Team: <@&${avionicsId}>`)));
-    await board.execute(message, ['team', f.task.issueKey, 'none']);
-    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamRoleId, null);
-});
-
-test('the text command workflow preserves legacy team tags through claim, start, completion, and release', async () => {
-    const f = fixture({ roles: [avionicsId] });
-    f.client.taskStorage.updateTask(f.guild.id, f.task.id, { ...f.task, assignedToRole: avionicsId });
-    const message = { ...f.actor, reply: async () => {} };
-    for (const command of ['claim', 'start', 'done', 'reopen', 'release']) {
-        await board.execute(message, [command, f.task.issueKey]);
-        assert.equal(f.client.taskStorage.getAllTasks(f.guild.id)[0].teamRoleId, avionicsId);
+test('legacy role setup and task tags convert to labels that survive Discord role deletion', async () => {
+    for (const legacyAssignment of [true, false]) {
+        const f = fixture({ roles: ['old-role'] });
+        f.guild.roles.cache.set('old-role', { id: 'old-role', name: 'Avionics' });
+        f.client.serverConfigs[f.guild.id] = { allowedChannelIds: [], teamRoleIds: ['old-role'] };
+        f.client.taskStorage.updateTask(f.guild.id, f.task.id, { ...f.task, ...(legacyAssignment ? { assignedToRole: 'old-role' } : { teamRoleId: 'old-role' }) });
+        const message = { ...f.actor, reply: async () => {} };
+        for (const command of ['claim', 'start', 'done', 'reopen', 'release']) {
+            await board.execute(message, [command, f.task.issueKey]);
+            assert.deepEqual(getTaskTeam(f.client.taskStorage.getAllTasks(f.guild.id)[0]), { id: 'legacy-old-role', name: 'Avionics' });
+        }
+        saveTeams(f.actor, ['Avionics']);
+        f.guild.roles.cache.delete('old-role');
+        f.actor.member.roles.cache.clear();
+        assert.equal(loadServerConfig(f.guild.id).teamRoleIds, undefined);
+        assert.deepEqual(getConfiguredTeams(f.actor), [{ id: 'legacy-old-role', name: 'Avionics' }]);
+        const task = f.client.taskStorage.getAllTasks(f.guild.id)[0];
+        assert.equal(task.teamRoleId, undefined);
+        assert.equal(claimError(f.actor, task), null);
+        assert.match(board.buildIssueEmbed(task, 0, f.actor).toJSON().fields.find(field => field.name === 'Team').value, /Avionics/);
+        saveTeams(f.actor, []);
+        assert.deepEqual(listTaskTeams([task], f.actor), [{ id: 'legacy-old-role', name: 'Avionics' }]);
     }
+});
+
+test('everyone can browse teams by text; only managers can open team setup', async () => {
+    const f = fixture();
+    configureTeams(f);
+    const sent = [];
+    const message = { ...f.actor, reply: async content => sent.push(content), channel: { send: async payload => sent.push(payload) } };
+    await teamsCommand.execute(message);
+    assert.match(sent.at(-1).content, /Team Tasks/);
+    await teamsCommand.execute(message, ['setup']);
+    assert.match(sent.at(-1), /Manage Server/);
+    f.actor.member.permissions.has = () => true;
+    await teamsCommand.execute(message, ['setup']);
+    assert.match(sent.at(-1).content, /Setup Teams/);
+});
+
+test('long team names with Markdown characters fit setup messages and remain literal in task details', () => {
+    const f = fixture();
+    const teams = configureTeams(f, Array.from({ length: maxTeams }, (_, i) => `${i}${'*'.repeat(48)}`.slice(0, maxTeamNameLength)));
+    assert.ok(buildTeamSetup(f.actor, 'Teams saved.').content.length <= 2000);
+    assert.ok(buildTeamSetupModal(f.actor).toJSON().components[0].component.value.length <= maxTeams * (maxTeamNameLength + 1));
+    const task = tagged(f.task, teams[0]);
+    assert.match(board.buildIssueEmbed(task, 0).toJSON().fields.find(field => field.name === 'Team').value, /\\\*/);
 });
