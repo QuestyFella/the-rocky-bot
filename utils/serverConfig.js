@@ -13,6 +13,7 @@ function normalizeConfig(config = {}) {
     if (!Array.isArray(config.allowedChannelIds)) {
         config.allowedChannelIds = [];
     }
+    if (!Array.isArray(config.teamRoleIds)) config.teamRoleIds = [];
 
     return config;
 }
@@ -43,7 +44,9 @@ function saveServerConfig(guildId, config) {
             fs.mkdirSync(configDir, { recursive: true });
         }
 
-        fs.writeFileSync(getConfigPath(guildId), JSON.stringify(normalizeConfig(config), null, 2));
+        const configPath = getConfigPath(guildId);
+        fs.writeFileSync(`${configPath}.tmp`, JSON.stringify(normalizeConfig(config), null, 2));
+        fs.renameSync(`${configPath}.tmp`, configPath);
         return true;
     } catch (error) {
         console.error(`Error saving config for server ${guildId}:`, error);

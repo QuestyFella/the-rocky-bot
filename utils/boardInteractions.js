@@ -1,8 +1,9 @@
 const { MessageFlags } = require('discord.js');
 const board = require('../commands/board');
 const { canRunInChannel, getCachedServerConfig } = require('./serverConfig');
-const { buildBoardComponents, buildTaskPicker, buildIssueComponents, buildAddModal, filterTasks } = require('./boardComponents');
-const { sortBoardTasks, getIssueKey, normalizePriority, normalizeColumn, userCanManageIssue, claimError, releaseError, setTaskStatus } = require('./kanban');
+const { buildBoardComponents, buildTaskPicker, buildIssueComponents, buildAddModal, buildTeamSetup, filterTasks } = require('./boardComponents');
+const { sortBoardTasks, getIssueKey, normalizePriority, normalizeColumn, userCanManageIssue, claimError, releaseError, setTaskStatus, isManager, preserveTaskTeam } = require('./kanban');
+const { getConfiguredTeams, saveTeams, validateTeam } = require('./teams');
 
 function issuePayload(actor, task, content = '') {
     return {
@@ -14,7 +15,7 @@ function issuePayload(actor, task, content = '') {
 }
 
 async function handleBoardInteraction(interaction) {
-    if (!interaction.customId?.startsWith('kanban:') || !(interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit())) return false;
+    if (!interaction.customId?.startsWith('kanban:') || !(interaction.isButton() || interaction.isStringSelectMenu() || interaction.isRoleSelectMenu() || interaction.isModalSubmit())) return false;
     if (!interaction.inGuild()) {
         await interaction.reply({ content: 'Use this board in a server.', flags: MessageFlags.Ephemeral });
         return true;
@@ -31,7 +32,7 @@ async function handleBoardInteraction(interaction) {
 
     const [, action, target, page] = interaction.customId.split(':');
     if (action === 'add' && interaction.isButton()) {
-        await interaction.showModal(buildAddModal());
+        await interaction.showModal(buildAddModal(getConfiguredTeams({ client: interaction.client, guild: interaction.guild })));
         return true;
     }
 
@@ -49,6 +50,20 @@ async function handleBoardInteraction(interaction) {
     const actor = { client: interaction.client, guild: interaction.guild, author: interaction.user, member };
     const replyError = content => interaction.editReply({ content, embeds: [], components: [], allowedMentions: { parse: [] } });
 
+    if (action === 'teamsetup') {
+        if (!isManager(actor)) {
+            await replyError('You need Manage Server permission to set up teams. Use My Teams to see your work.');
+            return true;
+        }
+        await interaction.guild.roles.fetch();
+        if (target === 'save' || target === 'clear') {
+            const error = saveTeams(actor, target === 'clear' ? [] : interaction.values || []);
+            if (error) await replyError(error);
+            else await interaction.editReply(buildTeamSetup(actor, target === 'clear' ? 'Team setup cleared.' : 'Teams saved. The Add Task form now includes your team choices.'));
+        } else await interaction.editReply(buildTeamSetup(actor));
+        return true;
+    }
+
     if (action === 'create' && interaction.isModalSubmit()) {
         const title = interaction.fields.getTextInputValue('title').trim();
         const description = interaction.fields.getTextInputValue('description').trim();
@@ -56,14 +71,20 @@ async function handleBoardInteraction(interaction) {
         const dueInput = interaction.fields.getTextInputValue('due').trim();
         const priority = priorityInput ? normalizePriority(priorityInput) : 'medium';
         const due = board.parseDueDate(dueInput);
+        // Old forms submitted after a restart may have no team field.
+        const teamValue = interaction.fields.fields?.has('team') ? interaction.fields.getStringSelectValues('team')?.[0] : null;
+        const teamRoleId = teamValue && teamValue !== 'none' ? teamValue : null;
+        const teamError = validateTeam(actor, teamRoleId);
         if (!title || title.length > 200 || description.length > 2000) {
             await replyError('Please give the task a title of 1–200 characters and a description of at most 2,000 characters.');
         } else if (!priority) {
             await replyError('Choose low, medium, high, or urgent for the priority.');
         } else if (dueInput && (!/^\d{4}-\d{2}-\d{2}$/.test(dueInput) || !due.ok)) {
             await replyError('Enter a real due date in YYYY-MM-DD format, or leave it blank.');
+        } else if (teamError) {
+            await replyError(teamError);
         } else {
-            const task = board.createIssue(actor, { title, description, priority, dueDate: due.dueDate, status: 'todo' });
+            const task = board.createIssue(actor, { title, description, priority, dueDate: due.dueDate, status: 'todo', teamRoleId });
             if (!interaction.client.taskStorage.addTask(interaction.guildId, task)) await replyError('Failed to save the task.');
             else await interaction.editReply(issuePayload(actor, task, `Created **${getIssueKey(task)}**. It is available for someone to claim.`));
         }
@@ -71,9 +92,9 @@ async function handleBoardInteraction(interaction) {
     }
 
     if (action === 'list') {
-        const filter = ['available', 'mine', 'all'].includes(target) ? target : 'all';
+        const filter = ['available', 'mine', 'all', 'teams'].includes(target) ? target : 'all';
         const tasks = sortBoardTasks(filterTasks(interaction.client.taskStorage.getAllTasks(interaction.guildId), filter, actor));
-        await interaction.editReply(buildTaskPicker(tasks, filter, page));
+        await interaction.editReply(buildTaskPicker(tasks, filter, page, actor));
         return true;
     }
 
@@ -97,6 +118,7 @@ async function handleBoardInteraction(interaction) {
     if (action === 'claim' || action === 'start') {
         error = claimError(actor, task);
         if (!error) {
+            preserveTaskTeam(task);
             task.userId = interaction.user.id;
             task.assignedToRole = null;
             task.assignedBy = interaction.user.id;
@@ -107,11 +129,25 @@ async function handleBoardInteraction(interaction) {
     } else if (action === 'release') {
         error = releaseError(actor, task);
         if (!error) {
+            preserveTaskTeam(task);
             task.userId = null;
             task.assignedToRole = null;
             task.assignedBy = null;
             setTaskStatus(task, 'todo');
             content = 'Released back to To Do for someone else to claim.';
+        }
+    } else if (action === 'team') {
+        const roleId = interaction.values?.[0];
+        if (!userCanManageIssue(actor, task)) error = 'You do not have permission to change this task’s team.';
+        else if (!roleId) error = 'Choose a team or No team.';
+        else {
+            const teamRoleId = roleId === 'none' ? null : roleId;
+            error = validateTeam(actor, teamRoleId);
+            if (!error) {
+                task.teamRoleId = teamRoleId;
+                task.updatedAt = new Date().toISOString();
+                content = teamRoleId ? 'Team tag updated.' : 'Team tag cleared.';
+            }
         }
     } else if (action === 'status') {
         const status = normalizeColumn(interaction.values?.[0]);

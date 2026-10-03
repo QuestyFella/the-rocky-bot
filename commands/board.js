@@ -5,8 +5,10 @@ const { dataPath } = require('../utils/dataPaths');
 const { buildBoardComponents, buildTaskPicker, filterTasks } = require('../utils/boardComponents');
 const {
     columns, priorities, normalizeColumn, normalizePriority, getTaskStatus, getTaskPriority,
-    getIssueKey, sortBoardTasks, setTaskStatus, userCanManageIssue, claimError, releaseError
+    getIssueKey, sortBoardTasks, setTaskStatus, userCanManageIssue, claimError, releaseError,
+    getTaskTeamRoleId, preserveTaskTeam
 } = require('../utils/kanban');
+const { validateTeam } = require('../utils/teams');
 
 const boardConfigFile = dataPath('kanbanBoards.json');
 const legacyBoardConfigFile = dataPath('jiraBoards.json');
@@ -157,7 +159,8 @@ function getIssueDisplayKey(task, displayIndex) {
 function formatIssueLine(task, displayIndex) {
     const priority = priorities[getTaskPriority(task)];
     const due = formatDueDate(task.dueDate);
-    const details = [formatAssignee(task), due].filter(Boolean).join(' - ');
+    const teamRoleId = getTaskTeamRoleId(task);
+    const details = [teamRoleId ? `Team: <@&${teamRoleId}>` : '', formatAssignee(task), due].filter(Boolean).join(' - ');
     const title = truncate(task.title, 58);
     const issueKey = getIssueDisplayKey(task, displayIndex);
     return `\`${issueKey}\` ${priority.icon} **${title}**${details ? ` - ${details}` : ''}`;
@@ -202,7 +205,7 @@ function generateBoardEmbed(client, guildId, guildName = 'Server') {
     const embed = new EmbedBuilder()
         .setColor(kanbanBlue)
         .setTitle(config.title || `${guildName} Kanban Board`)
-        .setDescription(`${activeCount} active task(s), ${doneCount} done.\nClick **Available Tasks** to claim a task, or **My Tasks** to update your work.`)
+        .setDescription(`${activeCount} active task(s), ${doneCount} done.\nClick **Available Tasks** to claim work, **My Tasks** for your tasks, or **My Teams** for your teams’ work.`)
         .setFooter({ text: 'Claim assigns a task to you · Start Work also moves it to In Progress' })
         .setTimestamp();
 
@@ -398,6 +401,7 @@ function createIssue(message, parsed) {
         updatedAt: new Date().toISOString(),
         userId: parsed.user ? parsed.user.id : null,
         assignedToRole: parsed.role ? parsed.role.id : null,
+        teamRoleId: Object.hasOwn(parsed, 'teamRoleId') ? parsed.teamRoleId : parsed.role ? parsed.role.id : null,
         assignedBy: parsed.user || parsed.role ? message.author.id : null,
         createdBy: message.author.id,
         guildId: message.guild.id
@@ -416,6 +420,7 @@ function buildIssueEmbed(task, displayIndex) {
             { name: 'Status', value: `${status.icon} ${status.name}`, inline: true },
             { name: 'Priority', value: `${priority.icon} ${priority.label}`, inline: true },
             { name: 'Assignee', value: formatAssignee(task), inline: true },
+            { name: 'Team', value: getTaskTeamRoleId(task) ? `<@&${getTaskTeamRoleId(task)}>` : 'No team', inline: true },
             { name: 'Due', value: formatDueDate(task.dueDate) || 'No due date', inline: true },
             { name: 'Created', value: task.createdAt ? `<t:${Math.floor(new Date(task.createdAt).getTime() / 1000)}:R>` : 'Unknown', inline: true },
             { name: 'Task ID', value: String(task.id), inline: true }
@@ -460,12 +465,13 @@ function sendUsage(message) {
         .setDescription(
             '`!task setup` - Create a live-updating board in this channel.\n' +
             '`!task` - Open the board and its buttons.\n' +
-            'Click **Add Task** to create a task, **Available Tasks** to claim work, or **My Tasks** to update your tasks.\n' +
+            'Click **Add Task** to create a task, **Available Tasks** to claim work, **My Tasks** for your tasks, or **My Teams** for your teams’ work. Managers can choose team roles with **Setup Teams**.\n' +
             '`!task add Fix avionics @user by 2026-06-01` - Add an issue.\n' +
             '`!task move KEY doing` - Move an issue between columns.\n' +
             '`!task claim KEY` - Assign an issue to yourself.\n' +
             '`!task start KEY` - Claim and move to In Progress.\n' +
             '`!task release KEY` - Return your task to To Do.\n' +
+            '`!task team KEY @TeamRole` - Set a team tag; use `none` to clear it.\n' +
             '`!task assign KEY @user` - Assign an issue.\n' +
             '`!task priority KEY high` - Set priority.\n' +
             '`!task due KEY 2026-06-01` - Set or clear a due date.\n' +
@@ -495,9 +501,26 @@ module.exports = {
             return message.channel.send({ embeds: [embed], components: buildBoardComponents(), allowedMentions: { parse: [] } });
         }
 
-        if (['mine', 'available'].includes(subcommand)) {
-            const tasks = sortBoardTasks(filterTasks(message.client.taskStorage.getAllTasks(message.guild.id), subcommand, message));
-            return message.channel.send(buildTaskPicker(tasks, subcommand));
+        if (['mine', 'available', 'myteams'].includes(subcommand)) {
+            const filter = subcommand === 'myteams' ? 'teams' : subcommand;
+            const tasks = sortBoardTasks(filterTasks(message.client.taskStorage.getAllTasks(message.guild.id), filter, message));
+            return message.channel.send(buildTaskPicker(tasks, filter, 0, message));
+        }
+
+        if (subcommand === 'team') {
+            if (args.length < 2) return message.reply('Usage: `!task team KEY @TeamRole` or `!task team KEY none`. Use Setup Teams first.');
+            const { task } = findTask(message, args[0]);
+            if (!task) return message.reply('I could not find that task.');
+            if (!userCanManageIssue(message, task)) return message.reply('You do not have permission to change this task’s team.');
+            const role = message.mentions.roles.first();
+            const teamRoleId = ['none', 'clear'].includes(args[1].toLowerCase()) ? null : role?.id;
+            if (teamRoleId === undefined) return message.reply('Mention a configured team role or use `none`.');
+            const error = validateTeam(message, teamRoleId);
+            if (error) return message.reply(error);
+            task.teamRoleId = teamRoleId;
+            task.updatedAt = new Date().toISOString();
+            const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
+            return message.reply(success ? `Updated the team tag for ${getIssueKey(task) || task.id}.` : 'Failed to save the team tag.');
         }
 
         if (subcommand === 'setup') {
@@ -596,6 +619,7 @@ module.exports = {
             const error = claimError(message, task);
             if (error) return message.reply(error);
 
+            preserveTaskTeam(task);
             task.userId = message.author.id;
             task.assignedToRole = null;
             task.assignedBy = message.author.id;
@@ -610,6 +634,7 @@ module.exports = {
             if (!task) return message.reply('I could not find that task.');
             const error = claimError(message, task);
             if (error) return message.reply(error);
+            preserveTaskTeam(task);
             task.userId = message.author.id;
             task.assignedToRole = null;
             task.assignedBy = message.author.id;
@@ -624,6 +649,7 @@ module.exports = {
             if (!task) return message.reply('I could not find that task.');
             const error = releaseError(message, task);
             if (error) return message.reply(error);
+            preserveTaskTeam(task);
             task.userId = null;
             task.assignedToRole = null;
             task.assignedBy = null;
@@ -649,6 +675,8 @@ module.exports = {
             const user = message.mentions.users.first();
             const role = message.mentions.roles.first();
 
+            preserveTaskTeam(task);
+
             if (target === 'none' || target === 'unassigned') {
                 task.userId = null;
                 task.assignedToRole = null;
@@ -664,6 +692,7 @@ module.exports = {
                 }
                 task.userId = null;
                 task.assignedToRole = role.id;
+                if (!task.teamRoleId) task.teamRoleId = role.id;
             } else {
                 return message.reply('Please mention a user or role, or use `none`.');
             }

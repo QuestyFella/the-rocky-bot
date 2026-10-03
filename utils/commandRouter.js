@@ -10,6 +10,8 @@ const kanbanSubcommands = new Set([
     'claim',
     'available',
     'mine',
+    'myteams',
+    'team',
     'release',
     'unclaim',
     'start',

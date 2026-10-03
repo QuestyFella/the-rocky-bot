@@ -45,6 +45,15 @@ function getIssueKey(task) {
     return task.issueKey || task.jiraKey;
 }
 
+function getTaskTeamRoleId(task) {
+    // Older role assignments double as team tags until first edited.
+    return Object.hasOwn(task, 'teamRoleId') ? task.teamRoleId || null : task.assignedToRole || null;
+}
+
+function preserveTaskTeam(task) {
+    if (!Object.hasOwn(task, 'teamRoleId')) task.teamRoleId = getTaskTeamRoleId(task);
+}
+
 function sortBoardTasks(tasks) {
     return [...tasks].sort((a, b) => {
         const status = getTaskStatus(a);
@@ -93,5 +102,6 @@ function setTaskStatus(task, status) {
 
 module.exports = {
     columns, priorities, normalizeColumn, normalizePriority, getTaskStatus, getTaskPriority,
-    getIssueKey, sortBoardTasks, isManager, userCanManageIssue, claimError, releaseError, setTaskStatus
+    getIssueKey, sortBoardTasks, isManager, userCanManageIssue, claimError, releaseError, setTaskStatus,
+    getTaskTeamRoleId, preserveTaskTeam
 };
