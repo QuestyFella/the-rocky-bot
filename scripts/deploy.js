@@ -27,6 +27,12 @@ async function waitForReady(name, readyFile, timeoutMs = 45000) {
 }
 
 function applyConfig(configPath, name, root, releaseDir, readyFile) {
+    const existing = pm2Process(name);
+    // PM2 can retain pm_exec_path and pm_cwd on startOrRestart. Replace this
+    // named process when changing releases so it actually runs the new files.
+    if (existing && (existing.pm2_env.pm_exec_path !== path.join(releaseDir, 'bot.js') || existing.pm2_env.pm_cwd !== releaseDir)) {
+        run('pm2', ['delete', name], { stdio: 'inherit' });
+    }
     run('pm2', ['startOrRestart', configPath, '--only', name, '--update-env'], {
         stdio: 'inherit',
         env: { ...process.env, BOT_PM2_NAME: name, BOT_RELEASE_DIR: releaseDir, BOT_DATA_DIR: root, BOT_ENV_FILE: path.join(root, '.env'), BOT_READY_FILE: readyFile }

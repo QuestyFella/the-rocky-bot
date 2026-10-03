@@ -42,6 +42,7 @@ const fs=require('fs');
 const args=process.argv.slice(2);
 fs.appendFileSync(process.env.FAKE_CALLS,JSON.stringify(['pm2',...args])+'\\n');
 if(args[0]==='jlist')console.log(fs.readFileSync(process.env.FAKE_PM2,'utf8'));
+if(args[0]==='delete')fs.writeFileSync(process.env.FAKE_PM2,'[]');
 if(args[0]==='startOrRestart'){
     const app=require(args[1]).apps[0];
     const p={name:app.name,pid:88,pm2_env:{status:'online',pm_cwd:app.cwd,pm_exec_path:app.script,exec_interpreter:process.execPath,...app.env}};
@@ -77,6 +78,7 @@ test('main deploy builds a separate release, preserves live data, confirms login
     assert.equal(fs.existsSync(path.join(result.releaseDir, 'node_modules', 'old.js')), false);
     assert.deepEqual(f.calls().filter(call => call[0] === 'npm').map(call => call.slice(1)), [['ci', '--omit=dev', '--no-audit', '--no-fund'], ['run', 'check'], ['test']]);
     assert.equal(JSON.parse(fs.readFileSync(f.statePath))[0].pm2_env.BOT_DATA_DIR, f.root);
+    assert.ok(f.calls().some(call => call[0] === 'pm2' && call[1] === 'delete' && call[2] === 'the-bot'));
     const before = f.calls().filter(call => call[1] === 'startOrRestart').length;
     assert.equal((await deployMain({ root: f.root })).changed, false);
     assert.equal(f.calls().filter(call => call[1] === 'startOrRestart').length, before);
