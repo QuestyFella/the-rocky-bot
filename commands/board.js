@@ -1,63 +1,17 @@
 const { EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const fs = require('fs');
+const { randomUUID } = require('crypto');
+const { dataPath } = require('../utils/dataPaths');
+const { buildBoardComponents, buildTaskPicker, filterTasks } = require('../utils/boardComponents');
+const {
+    columns, priorities, normalizeColumn, normalizePriority, getTaskStatus, getTaskPriority,
+    getIssueKey, sortBoardTasks, setTaskStatus, userCanManageIssue, claimError, releaseError
+} = require('../utils/kanban');
 
-const boardConfigFile = './kanbanBoards.json';
-const legacyBoardConfigFile = './jiraBoards.json';
+const boardConfigFile = dataPath('kanbanBoards.json');
+const legacyBoardConfigFile = dataPath('jiraBoards.json');
 const kanbanBlue = 0x0052cc;
 let boardConfigCache = null;
-
-const columns = [
-    { id: 'todo', name: 'To Do', icon: '📥' },
-    { id: 'progress', name: 'In Progress', icon: '🔧' },
-    { id: 'review', name: 'Review', icon: '👀' },
-    { id: 'done', name: 'Done', icon: '✅' }
-];
-
-const columnAliases = {
-    backlog: 'todo',
-    open: 'todo',
-    ready: 'todo',
-    todo: 'todo',
-    'to-do': 'todo',
-    doing: 'progress',
-    progress: 'progress',
-    'in-progress': 'progress',
-    inprogress: 'progress',
-    wip: 'progress',
-    review: 'review',
-    testing: 'review',
-    test: 'review',
-    qa: 'review',
-    done: 'done',
-    complete: 'done',
-    completed: 'done',
-    closed: 'done'
-};
-
-const priorities = {
-    low: { label: 'Low', icon: '🟢', weight: 1 },
-    medium: { label: 'Medium', icon: '🟡', weight: 2 },
-    high: { label: 'High', icon: '🟠', weight: 3 },
-    urgent: { label: 'Urgent', icon: '🔴', weight: 4 }
-};
-
-const priorityAliases = {
-    l: 'low',
-    low: 'low',
-    normal: 'medium',
-    med: 'medium',
-    medium: 'medium',
-    m: 'medium',
-    high: 'high',
-    h: 'high',
-    urgent: 'urgent',
-    critical: 'urgent',
-    blocker: 'urgent',
-    p1: 'urgent',
-    p2: 'high',
-    p3: 'medium',
-    p4: 'low'
-};
 
 function loadBoardConfigs() {
     if (boardConfigCache) {
@@ -132,36 +86,6 @@ function getNextIssueKey(guild) {
     return issueKey;
 }
 
-function normalizeColumn(value) {
-    if (!value) return null;
-
-    const cleaned = String(value).toLowerCase().trim().replace(/[_\s]+/g, '-');
-    return columnAliases[cleaned] || columnAliases[cleaned.replace(/-/g, '')] || null;
-}
-
-function normalizePriority(value) {
-    if (!value) return null;
-    return priorityAliases[String(value).toLowerCase().trim()] || null;
-}
-
-function getTaskStatus(task) {
-    const status = normalizeColumn(task.status);
-    if (status === 'done' || task.completed) {
-        return 'done';
-    }
-    return status || 'todo';
-}
-
-function getTaskPriority(task) {
-    return normalizePriority(task.priority) || 'medium';
-}
-
-function setTaskStatus(task, status) {
-    task.status = status;
-    task.completed = status === 'done';
-    task.updatedAt = new Date().toISOString();
-}
-
 function parseDueDate(input) {
     const value = String(input || '').trim();
     if (!value) {
@@ -174,9 +98,10 @@ function parseDueDate(input) {
 
     if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
         const parsed = new Date(`${value}T00:00:00Z`);
-        if (!Number.isNaN(parsed.getTime())) {
+        if (!Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value) {
             return { ok: true, dueDate: value };
         }
+        return { ok: false };
     }
 
     const parsed = new Date(value);
@@ -225,42 +150,8 @@ function isMentionToken(token, user, role) {
     return false;
 }
 
-function sortBoardTasks(tasks) {
-    return [...tasks].sort((a, b) => {
-        const aStatus = getTaskStatus(a);
-        const bStatus = getTaskStatus(b);
-        const aColumn = columns.findIndex(column => column.id === aStatus);
-        const bColumn = columns.findIndex(column => column.id === bStatus);
-
-        if (aColumn !== bColumn) {
-            return aColumn - bColumn;
-        }
-
-        if (aStatus === 'done') {
-            return new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0);
-        }
-
-        const priorityDifference = priorities[getTaskPriority(b)].weight - priorities[getTaskPriority(a)].weight;
-        if (priorityDifference !== 0) {
-            return priorityDifference;
-        }
-
-        if (a.dueDate && b.dueDate) {
-            return new Date(a.dueDate) - new Date(b.dueDate);
-        }
-        if (a.dueDate) return -1;
-        if (b.dueDate) return 1;
-
-        return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
-    });
-}
-
 function getIssueDisplayKey(task, displayIndex) {
     return getIssueKey(task) || `#${displayIndex + 1}`;
-}
-
-function getIssueKey(task) {
-    return task.issueKey || task.jiraKey;
 }
 
 function formatIssueLine(task, displayIndex) {
@@ -311,8 +202,8 @@ function generateBoardEmbed(client, guildId, guildName = 'Server') {
     const embed = new EmbedBuilder()
         .setColor(kanbanBlue)
         .setTitle(config.title || `${guildName} Kanban Board`)
-        .setDescription(`${activeCount} active issue(s), ${doneCount} done. Use \`!task help\` for commands.`)
-        .setFooter({ text: 'Add: !task add Task title | Move: !task move KEY doing' })
+        .setDescription(`${activeCount} active task(s), ${doneCount} done.\nClick **Available Tasks** to claim a task, or **My Tasks** to update your work.`)
+        .setFooter({ text: 'Claim assigns a task to you · Start Work also moves it to In Progress' })
         .setTimestamp();
 
     for (const column of columns) {
@@ -335,7 +226,7 @@ function findTask(message, identifier) {
         return { tasks, task: null };
     }
 
-    let task = tasks.find(item => String(getIssueKey(item) || '').toUpperCase() === lookup);
+    let task = tasks.find(item => String(getIssueKey(item) || '').toUpperCase() === lookup || String(item.id).toUpperCase() === lookup);
 
     if (!task && /^\d+$/.test(lookup)) {
         task = tasks.find(item => String(item.id) === lookup);
@@ -347,19 +238,6 @@ function findTask(message, identifier) {
     }
 
     return { tasks, task };
-}
-
-function userCanManageIssue(message, task) {
-    if (message.member.permissions.has(PermissionFlagsBits.Administrator) || message.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
-        return true;
-    }
-    if (task.userId === message.author.id || task.createdBy === message.author.id || task.assignedBy === message.author.id) {
-        return true;
-    }
-    if (task.assignedToRole && message.member.roles.cache.has(task.assignedToRole)) {
-        return true;
-    }
-    return false;
 }
 
 function userCanAssignTo(message, user, role) {
@@ -378,11 +256,17 @@ function parseAddArgs(message, args) {
     let dueDate = null;
     let description = '';
     let unassigned = false;
+    let assignToMe = false;
     const titleParts = [];
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
         const lower = arg.toLowerCase();
+
+        if (['--me', '--claim'].includes(lower)) {
+            assignToMe = true;
+            continue;
+        }
 
         if (lower.startsWith('--priority=')) {
             priority = normalizePriority(arg.slice('--priority='.length)) || priority;
@@ -463,8 +347,9 @@ function parseAddArgs(message, args) {
         titleParts.push(arg);
     }
 
-    const mentionedUser = unassigned ? null : message.mentions.users.first();
-    const mentionedRole = unassigned ? null : message.mentions.roles.first();
+    const mentionedUser = message.mentions.users.first();
+    const mentionedRole = message.mentions.roles.first();
+    unassigned = unassigned || (!assignToMe && !mentionedUser && !mentionedRole);
     let cleanTitleParts = titleParts.filter(part => !isMentionToken(part, mentionedUser, mentionedRole));
 
     if (!dueDate) {
@@ -494,8 +379,28 @@ function parseAddArgs(message, args) {
         dueDate,
         priority,
         status,
-        user: mentionedUser || (!unassigned && !mentionedRole ? message.author : null),
-        role: mentionedRole
+        user: unassigned ? null : mentionedUser || (!mentionedRole ? message.author : null),
+        role: unassigned ? null : mentionedRole
+    };
+}
+
+function createIssue(message, parsed) {
+    return {
+        id: randomUUID(),
+        issueKey: getNextIssueKey(message.guild),
+        title: parsed.title,
+        description: parsed.description || '',
+        dueDate: parsed.dueDate || null,
+        priority: parsed.priority || 'medium',
+        status: parsed.status || 'todo',
+        completed: parsed.status === 'done',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        userId: parsed.user ? parsed.user.id : null,
+        assignedToRole: parsed.role ? parsed.role.id : null,
+        assignedBy: parsed.user || parsed.role ? message.author.id : null,
+        createdBy: message.author.id,
+        guildId: message.guild.id
     };
 }
 
@@ -505,8 +410,8 @@ function buildIssueEmbed(task, displayIndex) {
     const issueKey = getIssueDisplayKey(task, displayIndex);
     const embed = new EmbedBuilder()
         .setColor(kanbanBlue)
-        .setTitle(`${issueKey}: ${task.title}`)
-        .setDescription(task.description || 'No description.')
+        .setTitle(truncate(`${issueKey}: ${task.title}`, 256))
+        .setDescription(truncate(task.description || 'No description.', 3000))
         .addFields(
             { name: 'Status', value: `${status.icon} ${status.name}`, inline: true },
             { name: 'Priority', value: `${priority.icon} ${priority.label}`, inline: true },
@@ -540,6 +445,7 @@ async function updateBoard(client, guildId) {
 
         await boardMessage.edit({
             embeds: [embed],
+            components: buildBoardComponents(),
             allowedMentions: { parse: [] }
         });
     } catch (error) {
@@ -553,17 +459,20 @@ function sendUsage(message) {
         .setTitle('Kanban Board Commands')
         .setDescription(
             '`!task setup` - Create a live-updating board in this channel.\n' +
-            '`!task` - Show the board once.\n' +
+            '`!task` - Open the board and its buttons.\n' +
+            'Click **Add Task** to create a task, **Available Tasks** to claim work, or **My Tasks** to update your tasks.\n' +
             '`!task add Fix avionics @user by 2026-06-01` - Add an issue.\n' +
             '`!task move KEY doing` - Move an issue between columns.\n' +
             '`!task claim KEY` - Assign an issue to yourself.\n' +
+            '`!task start KEY` - Claim and move to In Progress.\n' +
+            '`!task release KEY` - Return your task to To Do.\n' +
             '`!task assign KEY @user` - Assign an issue.\n' +
             '`!task priority KEY high` - Set priority.\n' +
             '`!task due KEY 2026-06-01` - Set or clear a due date.\n' +
             '`!task details KEY` - Show one issue.\n' +
             '`!task edit KEY New title` - Rename an issue.\n' +
             '`!task delete KEY` - Delete an issue.\n\n' +
-            'Aliases: `!task board`, `!task kanban`, and `!task jira`. Columns: `todo`, `doing`, `review`, `done`. Priorities: `low`, `medium`, `high`, `urgent`.'
+            'New tasks are unassigned by default; add `--me` to assign one to yourself.\nAliases: `!task board`, `!task kanban`, and `!task jira`. Columns: `todo`, `doing`, `review`, `done`. Priorities: `low`, `medium`, `high`, `urgent`.'
         )
         .setTimestamp();
 
@@ -583,7 +492,12 @@ module.exports = {
 
         if (['board', 'list', 'show'].includes(subcommand)) {
             const embed = generateBoardEmbed(message.client, message.guild.id, message.guild.name);
-            return message.channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+            return message.channel.send({ embeds: [embed], components: buildBoardComponents(), allowedMentions: { parse: [] } });
+        }
+
+        if (['mine', 'available'].includes(subcommand)) {
+            const tasks = sortBoardTasks(filterTasks(message.client.taskStorage.getAllTasks(message.guild.id), subcommand, message));
+            return message.channel.send(buildTaskPicker(tasks, subcommand));
         }
 
         if (subcommand === 'setup') {
@@ -593,7 +507,7 @@ module.exports = {
 
             getBoardConfig(message.guild, true);
             const embed = generateBoardEmbed(message.client, message.guild.id, message.guild.name);
-            const sentMessage = await message.channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+            const sentMessage = await message.channel.send({ embeds: [embed], components: buildBoardComponents(), allowedMentions: { parse: [] } });
             const configs = loadBoardConfigs();
             configs[message.guild.id] = {
                 ...configs[message.guild.id],
@@ -622,23 +536,7 @@ module.exports = {
                 return message.reply('You need Manage Guild permissions to assign issues to other users or roles.');
             }
 
-            const newTask = {
-                id: Date.now(),
-                issueKey: getNextIssueKey(message.guild),
-                title: parsed.title,
-                description: parsed.description,
-                dueDate: parsed.dueDate,
-                priority: parsed.priority,
-                status: parsed.status,
-                completed: parsed.status === 'done',
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-                userId: parsed.user ? parsed.user.id : null,
-                assignedToRole: parsed.role ? parsed.role.id : null,
-                assignedBy: message.author.id,
-                createdBy: message.author.id,
-                guildId: message.guild.id
-            };
+            const newTask = createIssue(message, parsed);
 
             const success = message.client.taskStorage.addTask(message.guild.id, newTask);
             if (!success) {
@@ -695,15 +593,43 @@ module.exports = {
             if (!task) {
                 return message.reply('I could not find that issue. Use the issue key, task ID, or board number.');
             }
-            if (!userCanManageIssue(message, task) && task.userId && task.userId !== message.author.id) {
-                return message.reply('You can only claim unassigned issues or issues you can manage.');
-            }
+            const error = claimError(message, task);
+            if (error) return message.reply(error);
 
             task.userId = message.author.id;
             task.assignedToRole = null;
+            task.assignedBy = message.author.id;
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
             return success ? message.reply(`Assigned ${getIssueKey(task) || task.id} to you.`) : message.reply('Failed to update issue.');
+        }
+
+        if (subcommand === 'start') {
+            if (!args[0]) return message.reply('Usage: `!task start KEY`');
+            const { task } = findTask(message, args[0]);
+            if (!task) return message.reply('I could not find that task.');
+            const error = claimError(message, task);
+            if (error) return message.reply(error);
+            task.userId = message.author.id;
+            task.assignedToRole = null;
+            task.assignedBy = message.author.id;
+            setTaskStatus(task, 'progress');
+            const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
+            return message.reply(success ? `Assigned ${getIssueKey(task) || task.id} to you and moved it to In Progress.` : 'Failed to update task.');
+        }
+
+        if (['release', 'unclaim'].includes(subcommand)) {
+            if (!args[0]) return message.reply('Usage: `!task release KEY`');
+            const { task } = findTask(message, args[0]);
+            if (!task) return message.reply('I could not find that task.');
+            const error = releaseError(message, task);
+            if (error) return message.reply(error);
+            task.userId = null;
+            task.assignedToRole = null;
+            task.assignedBy = null;
+            setTaskStatus(task, 'todo');
+            const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
+            return message.reply(success ? `Released ${getIssueKey(task) || task.id} back to To Do.` : 'Failed to update task.');
         }
 
         if (subcommand === 'assign') {
@@ -847,5 +773,9 @@ module.exports = {
         return sendUsage(message);
     },
     generateBoardEmbed,
+    buildIssueEmbed,
+    createIssue,
+    parseDueDate,
+    findTask,
     updateBoard
 };

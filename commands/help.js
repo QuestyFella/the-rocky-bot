@@ -7,7 +7,7 @@ module.exports = {
         const helpEmbed = new EmbedBuilder()
             .setColor(0x0052cc)
             .setTitle('Kanban Board Commands')
-            .setDescription('`!task` shows the board. Most work can be done with `add`, `move`, `claim`, and `done`.')
+            .setDescription('Open `!task` and use the buttons. Choose **Available Tasks**, pick a task, then **Claim** or **Start Work**. **My Tasks** shows your active work. Use the status dropdown to move a task to Review or Done.')
             .addFields(
                 {
                     name: 'Core Flow',
@@ -15,8 +15,11 @@ module.exports = {
                         '`!task` - Show the board.',
                         '`!task setup` - Create the live-updating board in this channel.',
                         '`!task add [issue]` - Add an issue.',
+                        '`!task available` / `!task mine` - Browse available tasks or your work.',
                         '`!task move [key] [todo|doing|review|done]` - Move an issue.',
                         '`!task claim [key]` - Assign an issue to yourself.',
+                        '`!task start [key]` - Claim and move to In Progress.',
+                        '`!task release [key]` - Return your task to To Do.',
                         '`!task done [key]` - Move an issue to Done.'
                     ].join('\n')
                 },

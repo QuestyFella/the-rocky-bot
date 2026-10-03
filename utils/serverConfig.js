@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const { dataPath } = require('./dataPaths');
 
-const configDir = './server-configs';
+const configDir = dataPath('server-configs');
 
 function normalizeConfig(config = {}) {
     if (config.allowedChannelId && !Array.isArray(config.allowedChannelIds)) {

@@ -5,7 +5,10 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "dev": "nodemon bot.js"
+    "dev": "nodemon bot.js",
+    "check": "node scripts/check.js",
+    "test": "node --test test/*.test.js",
+    "deploy": "node scripts/deploy.js"
   },
   "dependencies": {
     "discord.js": "^14.0.0",

@@ -3,3 +3,8 @@ server-tasks/server-configs/
 server-tasks/
 kanbanBoards.json
 jiraBoards.json
+node_modules/
+server-configs/
+.DS_Store
+.deploy/
+.ready.json

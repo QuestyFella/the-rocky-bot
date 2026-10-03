@@ -1,9 +1,11 @@
-const { Client, Events, GatewayIntentBits } = require('discord.js');
-require('dotenv').config();
+const { Client, Events, GatewayIntentBits, MessageFlags, ActivityType } = require('discord.js');
 const path = require('path');
+const fs = require('fs');
+require('dotenv').config({ path: process.env.BOT_ENV_FILE || path.join(__dirname, '.env') });
 const cron = require('node-cron');
 const TaskStorage = require('./taskStorage');
 const { executeCommand, loadCommands, parseMessageCommand } = require('./utils/commandRouter');
+const { handleBoardInteraction } = require('./utils/boardInteractions');
 const {
     canRunInChannel,
     getCachedServerConfig,
@@ -50,12 +52,38 @@ function scheduleLiveBoardUpdates() {
     console.log('Live board updater started');
 }
 
-client.once(Events.ClientReady, () => {
+client.once(Events.ClientReady, async () => {
     console.log(`Task Manager Bot is ready! Logged in as ${client.user.tag}`);
-    client.user.setActivity('Kanban board | Use !task', { type: 'WATCHING' });
+    client.user.setActivity('Kanban board | Use !task', { type: ActivityType.Watching });
+
+    if (process.env.BOT_READY_FILE) {
+        fs.writeFileSync(process.env.BOT_READY_FILE, JSON.stringify({ pid: process.pid, readyAt: new Date().toISOString() }));
+    }
+    if (process.send) process.send('ready');
 
     scheduleLiveBoardUpdates();
+    for (const guild of client.guilds.cache.values()) {
+        await client.commands.get('board').updateBoard(client, guild.id);
+    }
 });
+
+client.on(Events.InteractionCreate, async interaction => {
+    try {
+        await handleBoardInteraction(interaction);
+    } catch (error) {
+        console.error('Failed to handle board interaction:', error);
+        const payload = { content: 'Something went wrong. Refresh the task and try again.', embeds: [], components: [] };
+        if (interaction.deferred || interaction.replied) await interaction.editReply(payload).catch(() => {});
+        else await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+});
+
+function shutdown() {
+    client.destroy();
+    process.exit(0);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 const VERIFY_EMOJIS = ['🍎','🍊','🍇','🍓','🍌','🍉','🍒','🍑','🍍','🥝','🥭','🍋','🐟','🐢','🦊','🐱','🐶','🌟','🌙','☀️','🌈','🍀','🌹','🌻','🦄','🐝','🦋','🐙','🦀','🐸'];
 const PENDING_TTL_MS = 10 * 60 * 1000;

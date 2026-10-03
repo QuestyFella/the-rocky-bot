@@ -1,8 +1,9 @@
 const fs = require('fs');
 const path = require('path');
+const { dataPath } = require('./utils/dataPaths');
 
 class TaskStorage {
-    constructor(tasksDir = './server-tasks') {
+    constructor(tasksDir = dataPath('server-tasks')) {
         this.tasksDir = tasksDir;
         this.ensureDirectoryExists();
         this.updateListener = null;
@@ -52,8 +53,10 @@ class TaskStorage {
     saveTasks(guildId, tasks) {
         try {
             const filePath = this.getFilePath(guildId);
+            const temporaryPath = `${filePath}.tmp`;
+            fs.writeFileSync(temporaryPath, JSON.stringify(tasks, null, 2), 'utf8');
+            fs.renameSync(temporaryPath, filePath);
             this.cache.set(guildId, tasks);
-            fs.writeFileSync(filePath, JSON.stringify(tasks, null, 2), 'utf8');
             if (this.updateListener) {
                 Promise.resolve(this.updateListener(guildId)).catch(error => {
                     console.error(`Error running task update listener for guild ${guildId}:`, error);
@@ -67,13 +70,13 @@ class TaskStorage {
     }
 
     addTask(guildId, task) {
-        const tasks = this.loadTasks(guildId);
+        const tasks = this.getAllTasks(guildId);
         tasks.push(task);
         return this.saveTasks(guildId, tasks);
     }
 
     updateTask(guildId, taskId, updatedTask) {
-        const tasks = this.loadTasks(guildId);
+        const tasks = this.getAllTasks(guildId);
         const index = tasks.findIndex(task => task.id === taskId);
         if (index !== -1) {
             tasks[index] = updatedTask;
@@ -83,7 +86,7 @@ class TaskStorage {
     }
 
     deleteTask(guildId, taskId) {
-        const tasks = this.loadTasks(guildId);
+        const tasks = this.getAllTasks(guildId);
         const index = tasks.findIndex(task => task.id === taskId);
         if (index !== -1) {
             tasks.splice(index, 1);
@@ -93,7 +96,7 @@ class TaskStorage {
     }
 
     getAllTasks(guildId) {
-        return this.loadTasks(guildId);
+        return this.loadTasks(guildId).map(task => ({ ...task }));
     }
 
     getUserTasks(guildId, userId) {
