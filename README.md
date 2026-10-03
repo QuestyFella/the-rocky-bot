@@ -122,14 +122,19 @@ The PM2 deployment process checks `origin/main` every 60 seconds using the serve
 
 Requirements: Linux with `git`, `tar`, `flock`, Node.js 22 or newer, npm, PM2, and Git read access to this repository. Keep the bot token in the original installation's `.env` file.
 
-Run once from the original bot folder, using the PM2 name of the existing bot:
+Run once from the original bot folder, using the PM2 name of the existing bot. This also works when the original checkout is still on a feature branch:
 
 ```sh
-BOT_REPO_DIR="$PWD" BOT_PM2_NAME=the-bot pm2 start scripts/watch-main.js --name rocky-deploy --kill-timeout 310000
+git fetch origin main
+mkdir -p .deploy/automation
+printf '\n.deploy/\n' >> .git/info/exclude
+git show origin/main:scripts/deploy.js > .deploy/automation/deploy.js
+git show origin/main:scripts/watch-main.js > .deploy/automation/watch-main.js
+BOT_REPO_DIR="$PWD" BOT_PM2_NAME=the-bot pm2 start .deploy/automation/watch-main.js --name rocky-deploy --kill-timeout 310000 --time
 pm2 save
 ```
 
-The watcher makes an initial deployment, then deploys future changes pushed or merged into `main`. Check it with `pm2 logs rocky-deploy`. To deploy once manually, run `BOT_REPO_DIR="$PWD" BOT_PM2_NAME=the-bot npm run deploy` while the watcher is stopped. `DEPLOY_INTERVAL_MS` can change the polling interval. PM2's startup service should be configured with `pm2 startup` so both processes return after a server reboot.
+The watcher makes an initial deployment, then deploys future changes pushed or merged into `main`. Check it with `pm2 logs rocky-deploy`. To deploy once manually, run `BOT_REPO_DIR="$PWD" BOT_PM2_NAME=the-bot node .deploy/automation/deploy.js` while the watcher is stopped. `DEPLOY_INTERVAL_MS` can change the polling interval. PM2's startup service should be configured with `pm2 startup` so both processes return after a server reboot.
 
 Prepared releases live under `.deploy/releases/`; the current and preceding releases are retained. The original installation stays available for recovery. GitHub Actions also checks pushes and pull requests against `main`.
 
