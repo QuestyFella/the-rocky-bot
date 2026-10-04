@@ -465,8 +465,8 @@ function sendUsage(message) {
         .setDescription(
             '`!task setup` - Create a live-updating board in this channel.\n' +
             '`!task` - Open the board and its buttons.\n' +
-            '**Import Tasks** / `!task import` - Paste a list or upload a .txt file, then confirm the preview.\n' +
-            'Click **Add Task** to create a task, **Available Tasks** to claim work, **My Tasks** for your tasks, or **Team Tasks** to choose a group. Managers can enter team names with **Setup Teams**.\n' +
+            '**More → Import Tasks** / `!task import` - Managers can paste a list or upload a .txt file, then confirm the preview.\n' +
+            'Click **Add Task** to create a task, **Available Tasks** to claim work, **My Tasks** for your tasks, or **Team Tasks** to choose a group. Open a task and click **Edit Task** to edit its details. Managers can enter team names through **More → Setup Teams**.\n' +
             '`!task add Fix avionics @user by 2026-06-01` - Add an issue.\n' +
             '`!task move KEY doing` - Move an issue between columns.\n' +
             '`!task claim KEY` - Assign an issue to yourself.\n' +

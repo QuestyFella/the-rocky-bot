@@ -141,7 +141,7 @@ test('component payloads respect Discord limits and paginate every task', () => 
     assert.equal(new Set(seen).size, 61);
     for (const row of [...buildBoardComponents(), ...buildIssueComponents(f.task, f.actor)]) assert.ok(row.toJSON().components.length <= 5);
     assert.equal(buildAddModal().toJSON().components.length, 4);
-    assert.equal(buildTaskPicker([], 'all').components.length, 1);
+    assert.equal(buildTaskPicker([], 'all').components.length, 2);
 });
 
 test('modal validates dates and priority and creates an unassigned task', async () => {

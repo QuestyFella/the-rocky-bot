@@ -5,7 +5,7 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 ## Features
 
 - Live-updating Kanban board using embeds
-- Buttons, task pickers, and an Add Task form
+- Buttons, task pickers, and Add Task / Edit Task forms
 - Import a pasted list or text file, review a preview, then save the whole batch
 - Claim, Start Work, Release, and status changes without typing commands
 - Available Tasks and My Tasks views, with pagination for larger boards
@@ -32,12 +32,15 @@ Run `!task` (or ask a server manager to run `!task setup` once for a live board)
 3. Click **My Tasks** to see your active work. Choose a task and use its status dropdown to move it to Review or Done.
 4. Click **Release** to return your task to To Do for someone else to claim.
 5. Click **Team Tasks**, choose a group, and see its active tasks, including tasks claimed by teammates.
+6. Click **Edit Task** in a task's details to change its title, description, priority, or due date. The form is prefilled; leaving description or due date blank clears it. The creator, assignee, and server managers can edit tasks, as can members of an explicitly assigned role.
 
-Task pickers and task controls opened from the board are visible only to the person who clicked. Task pages show 10 entries with full titles, team, priority, status, and due date above the dropdown. Choose a task to read its full description and use its controls. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim.
+The shared board shows Add Task, Available Tasks, My Tasks, Team Tasks, and More. **More** opens a private menu: everyone sees Browse Tasks and Add Task; members with **Administrator** or **Manage Server** permission also see Import Tasks, Setup Teams, and Refresh Board. Task controls appear only when you can use them. Permissions are checked again when you click or save, including on older messages.
+
+Task pickers and task controls opened from the board are visible only to the person who clicked. Task pages show 10 entries with full titles, team, priority, status, and due date above the dropdown. Choose a task to read its full description and use its controls. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim. Edit forms expire after 15 minutes or a restart, and detect changes to task details made while the form was open. Assignment, status, and team changes made during an edit are preserved.
 
 ### Setting up teams
 
-1. A member with **Manage Server** permission opens `!task`, clicks **Setup Teams**, then **Edit Teams**. `!task teams setup` opens the same setup controls.
+1. A member with **Manage Server** permission opens `!task`, clicks **More**, **Setup Teams**, then **Edit Teams**. `!task teams setup` opens the same setup controls.
 2. Enter one group name per line (for example, Avionics, Software, and Mechanical), then submit the form.
 3. **Add Task** now includes a team dropdown. Existing tasks have a **Change team tag** dropdown for their creator, assignee, or a server manager.
 
@@ -47,11 +50,11 @@ Older team tags and role-assigned tasks remain visible in **Team Tasks**, and th
 
 ### Importing a task list
 
-1. Click **Import Tasks** on the board. Paste a short list, or upload the full list as a UTF-8 `.txt` or `.md` file. Use one input at a time. The form uses Discord's [file upload component](https://docs.discord.com/developers/components/reference#file-upload).
+1. A member with **Administrator** or **Manage Server** permission clicks **More**, then **Import Tasks**. Paste a short list, or upload the full list as a UTF-8 `.txt` or `.md` file. Use one input at a time. The form uses Discord's [file upload component](https://docs.discord.com/developers/components/reference#file-upload).
 2. Review the preview. Previous/Next shows each task's fields, and the attached preview file contains every entry and its full description.
 3. Click **Import Tasks** in the preview to save the batch. **Cancel** discards it. Tasks start unassigned in To Do, attributed to the person who imports them.
 
-You can also attach a text file to a message containing `!task import`, or paste a short list after that command. Anyone who can create tasks can import them. Only the person who submitted a list can confirm or cancel it, in the same server and channel.
+Managers can also attach a text file to a message containing `!task import`, or paste a short list after that command. Only the person who submitted a list can confirm or cancel it, in the same server and channel. Confirmation checks that they still have manager permission. Anyone can continue creating individual tasks with Add Task.
 
 Use this format; blank descriptions are allowed. Numbering and section headings are optional:
 

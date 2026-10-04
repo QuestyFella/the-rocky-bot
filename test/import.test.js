@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { Collection, MessageFlags, ModalSubmitFields, ModalSubmitInteraction } = require('discord.js');
+const { Collection, MessageFlags, ModalSubmitFields, ModalSubmitInteraction, PermissionFlagsBits } = require('discord.js');
 
 const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rocky-import-'));
 process.env.BOT_DATA_DIR = temporaryDir;
@@ -18,9 +18,9 @@ const { parseMessageCommand } = require('../utils/commandRouter');
 test.after(() => fs.rmSync(temporaryDir, { recursive: true, force: true }));
 let fixtureNumber = 0;
 
-function fixture() {
+function fixture({ manager = true } = {}) {
     const guild = { id: `import-guild-${++fixtureNumber}`, name: 'Rocket Club', roles: { cache: new Collection() } };
-    const member = { pending: false, permissions: { has: () => false }, roles: { cache: new Set() } };
+    const member = { pending: false, permissions: { has: flag => manager && [PermissionFlagsBits.Administrator, PermissionFlagsBits.ManageGuild].includes(flag) }, roles: { cache: new Set() } };
     guild.members = { fetch: async () => member };
     const client = { serverConfigs: {}, taskStorage: new TaskStorage(path.join(temporaryDir, guild.id)), pendingVerifications: new Map() };
     const actor = { guild, client, member, author: { id: 'alice' }, channelId: 'channel' };
@@ -29,7 +29,7 @@ function fixture() {
     assert.equal(saveTeams(actor, ['Cubesat', 'Software']), null);
     const replies = [];
     const interaction = {
-        customId: 'kanban:import', guildId: guild.id, guild, client, user: actor.author, channelId: actor.channelId,
+        customId: 'kanban:import', guildId: guild.id, guild, client, user: actor.author, channelId: actor.channelId, member, memberPermissions: member.permissions,
         inGuild: () => true, isButton: () => true, isStringSelectMenu: () => false, isRoleSelectMenu: () => false, isModalSubmit: () => false,
         message: { flags: { has: flag => flag === MessageFlags.Ephemeral }, edit: async payload => replies.push(['messageEdit', payload]) },
         reply: async payload => replies.push(['reply', payload]), editReply: async payload => replies.push(['editReply', payload]),
@@ -286,7 +286,7 @@ test('text import preserves multiline content, shows a preview, and supports a b
     assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).length, 1);
     message.content = '!task import';
     await importCommand.execute(message);
-    assert.equal(replies.at(-1).components[0].toJSON().components[0].custom_id, 'kanban:import');
+    assert.equal(replies.at(-1).components[0].toJSON().components[0].custom_id, 'kanban:more');
     f.member.pending = true;
     await importCommand.execute(message);
     assert.match(replies.at(-1), /verification/);

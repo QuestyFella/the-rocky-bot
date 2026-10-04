@@ -1,11 +1,12 @@
 const { MessageFlags, PermissionFlagsBits } = require('discord.js');
 const board = require('../commands/board');
 const { canRunInChannel, getCachedServerConfig } = require('./serverConfig');
-const { buildBoardComponents, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks } = require('./boardComponents');
+const { buildBoardComponents, buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks } = require('./boardComponents');
 const { sortBoardTasks, getIssueKey, normalizePriority, normalizeColumn, userCanManageIssue, claimError, releaseError, setTaskStatus, isManager } = require('./kanban');
 const { getConfiguredTeams, saveTeams, validateTeam, listTaskTeams, setTaskTeam, preserveTaskTeam } = require('./teams');
 const { readImportInput, prepareImport, getImportDraft, commitImport } = require('./taskImport');
 const { buildImportPreview, buildImportErrors } = require('./importComponents');
+const { prepareEdit, saveEdit } = require('./taskEditing');
 
 function issuePayload(actor, task, content = '') {
     return {
@@ -27,14 +28,34 @@ async function handleBoardInteraction(interaction) {
         await interaction.reply({ content: 'Task commands are disabled in this channel.', flags: MessageFlags.Ephemeral });
         return true;
     }
-    if (interaction.client.pendingVerifications?.has(`${interaction.guildId}:${interaction.user.id}`)) {
+    if (interaction.member?.pending || interaction.client.pendingVerifications?.has(`${interaction.guildId}:${interaction.user.id}`)) {
         await interaction.reply({ content: 'Finish verification before using the board.', flags: MessageFlags.Ephemeral });
         return true;
     }
 
     const [, action, target, page, selectedTeamId] = interaction.customId.split(':');
+    // Modal responses must be immediate. Discord supplies current permissions and
+    // role IDs on the interaction; saving rechecks a freshly fetched member.
+    const modalActor = {
+        client: interaction.client, guild: interaction.guild, author: interaction.user, channelId: interaction.channelId,
+        member: { permissions: interaction.memberPermissions || interaction.member?.permissions || { has: () => false }, roles: { cache: interaction.member?.roles?.cache || new Set(interaction.member?.roles || []) } }
+    };
+    if (action === 'edit' && interaction.isButton()) {
+        const task = interaction.client.taskStorage.getAllTasks(interaction.guildId).find(task => String(task.id) === target);
+        let error;
+        if (!task) error = 'This task no longer exists. Open Browse Tasks to choose another.';
+        else if (!userCanManageIssue(modalActor, task)) error = 'You do not have permission to edit this task.';
+        else if ((task.title || '').length > 4000 || (task.description || '').length > 4000) error = 'This task has text longer than the edit form supports. Use the text commands to edit it.';
+        if (error) await interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
+        else {
+            const draft = prepareEdit(modalActor, task);
+            await interaction.showModal(buildEditModal(task, draft.id));
+        }
+        return true;
+    }
     if (action === 'import' && interaction.isButton()) {
-        await interaction.showModal(buildImportModal());
+        if (!isManager(modalActor)) await interaction.reply({ content: 'You need Manage Server permission to import tasks. Use Add Task to create an individual task.', flags: MessageFlags.Ephemeral });
+        else await interaction.showModal(buildImportModal());
         return true;
     }
     if (action === 'add' && interaction.isButton()) {
@@ -55,13 +76,30 @@ async function handleBoardInteraction(interaction) {
     } else {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     }
-    const member = await interaction.guild.members.fetch(interaction.user.id);
+    const member = await interaction.guild.members.fetch({ user: interaction.user.id, force: true });
     if (member.pending) {
         await interaction.editReply({ content: 'Finish server verification before using the board.', embeds: [], components: [] });
         return true;
     }
     const actor = { client: interaction.client, guild: interaction.guild, author: interaction.user, member, channelId: interaction.channelId };
     const replyError = content => interaction.editReply({ content, embeds: [], components: [], allowedMentions: { parse: [] } });
+
+    if (['importpreview', 'importpage', 'importconfirm'].includes(action) && !isManager(actor)) {
+        await replyError('You need Manage Server permission to import tasks. Use Add Task to create an individual task.');
+        return true;
+    }
+
+    if (action === 'more') {
+        await interaction.editReply(buildMoreMenu(actor));
+        return true;
+    }
+
+    if (action === 'editsave' && interaction.isModalSubmit()) {
+        const { task, error } = saveEdit(actor, target, interaction.fields);
+        if (task) await interaction.editReply(issuePayload(actor, task, error || 'Task details saved. Use the dropdowns below to change its status or team.'));
+        else await replyError(error);
+        return true;
+    }
 
     if (action === 'importpreview' && interaction.isModalSubmit()) {
         let text;
@@ -163,9 +201,13 @@ async function handleBoardInteraction(interaction) {
     }
 
     if (action === 'refresh') {
+        if (!isManager(actor)) {
+            await replyError('You need Manage Server permission to refresh the live board. Task changes refresh it automatically.');
+            return true;
+        }
         await board.updateBoard(interaction.client, interaction.guildId);
-        await interaction.message.edit({ embeds: [board.generateBoardEmbed(interaction.client, interaction.guildId)], components: buildBoardComponents(), allowedMentions: { parse: [] } });
-        await interaction.editReply({ content: 'Board refreshed.', embeds: [], components: [] });
+        if (!interaction.message.flags.has(MessageFlags.Ephemeral)) await interaction.message.edit({ embeds: [board.generateBoardEmbed(interaction.client, interaction.guildId)], components: buildBoardComponents(), allowedMentions: { parse: [] } });
+        await interaction.editReply(buildMoreMenu(actor, 'Board refreshed.'));
         return true;
     }
 
