@@ -7,6 +7,7 @@ const { getConfiguredTeams, saveTeams, validateTeam, listTaskTeams, setTaskTeam,
 const { readImportInput, prepareImport, getImportDraft, commitImport } = require('./taskImport');
 const { buildImportPreview, buildImportErrors } = require('./importComponents');
 const { prepareEdit, saveEdit } = require('./taskEditing');
+const { groupTasksByTag } = require('./taskTags');
 
 function issuePayload(actor, task, content = '') {
     return {
@@ -187,9 +188,11 @@ async function handleBoardInteraction(interaction) {
 
     if (['list', 'page', 'teamview', 'teamlist'].includes(action)) {
         const allTasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
-        const filter = action === 'teamview' ? 'teams' : ['available', 'mine', 'all', 'teams'].includes(target) ? target : 'all';
+        const filter = action === 'teamview' ? 'teams' : ['available', 'mine', 'all', 'teams', 'tag'].includes(target) ? target : 'all';
         const teamId = action === 'teamview' ? interaction.values?.[0] : selectedTeamId;
-        if (action === 'teamlist' || (filter === 'teams' && !teamId)) {
+        if (filter === 'tag' && !groupTasksByTag(allTasks).some(tag => tag.id === teamId)) {
+            await interaction.editReply(buildMoreMenu(actor, 'This tag no longer has tasks. Use Browse Tasks to see the current list.'));
+        } else if (action === 'teamlist' || (filter === 'teams' && !teamId)) {
             await interaction.editReply(buildTeamPicker(allTasks, actor, action === 'teamlist' ? target : 0));
         } else if (filter === 'teams' && !listTaskTeams(allTasks, actor).some(team => team.id === teamId)) {
             await interaction.editReply(buildTeamPicker(allTasks, actor));
@@ -205,7 +208,7 @@ async function handleBoardInteraction(interaction) {
             await replyError('You need Manage Server permission to refresh the live board. Task changes refresh it automatically.');
             return true;
         }
-        await board.updateBoard(interaction.client, interaction.guildId);
+        await board.updateBoard(interaction.client, interaction.guildId, { force: true });
         await interaction.editReply(buildMoreMenu(actor, 'Board refreshed.'));
         return true;
     }

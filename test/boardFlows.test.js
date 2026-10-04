@@ -12,6 +12,7 @@ const board = require('../commands/board');
 const { handleBoardInteraction } = require('../utils/boardInteractions');
 const { buildBoardComponents, buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, pageSize } = require('../utils/boardComponents');
 const { getTaskStatus } = require('../utils/kanban');
+const { getTaskTag } = require('../utils/taskTags');
 const { saveTeams, getConfiguredTeams } = require('../utils/teams');
 const { prepareImport } = require('../utils/taskImport');
 const importCommand = require('../commands/import');
@@ -425,6 +426,61 @@ test('pagination navigates every page for all filters, keeps team selection, and
     assert.match((await interact(f, 'kanban:teamlist:99')).payload.content, /Choose a group/);
 });
 
+test('Open Tasks privately browses every page of one tag, including completed and assigned tasks', async () => {
+    const f = fixture();
+    const tasks = Array.from({ length: 37 }, (_, i) => ({ ...f.initial, id: `tag-task-${i}`, issueKey: `RC-${i + 1}`, title: `[${i < 27 ? 'POWER' : 'STM32'}] Task ${i}`, status: i % 3 ? 'todo' : 'done', completed: i % 3 === 0, userId: i % 2 ? 'bob' : null }));
+    f.client.taskStorage.saveTasks(f.guild.id, tasks);
+    const tagId = getTaskTag(tasks[0]).id;
+    let result = await interact(f, `kanban:list:tag:0:${tagId}`, { privateMessage: false });
+    assert.equal(result.responses[0][1].flags, MessageFlags.Ephemeral);
+    const seen = [];
+    for (let page = 0; page < 3; page++) {
+        assert.match(result.payload.content, /Tasks: POWER/);
+        const select = controls(result.payload).find(c => c.custom_id === 'kanban:select');
+        seen.push(...select.options.map(option => option.value));
+        const next = controls(result.payload).find(c => c.label === 'Next');
+        assert.equal(next.disabled, page === 2);
+        assert.ok(next.custom_id.endsWith(':' + tagId));
+        if (!next.disabled) result = await interact(f, next.custom_id);
+    }
+    assert.deepEqual(new Set(seen), new Set(tasks.slice(0, 27).map(task => task.id)));
+    const previous = controls(result.payload).find(c => c.label === 'Previous');
+    assert.ok(previous.custom_id.endsWith(':' + tagId));
+    result = await interact(f, previous.custom_id);
+    assert.match(result.payload.content, /Page 2\/3/);
+    const detail = await interact(f, 'kanban:select', { type: 'select', values: ['tag-task-2'] });
+    assert.ok(ids(detail.payload).includes('kanban:claim:tag-task-2'));
+    await interact(f, 'kanban:claim:tag-task-2');
+    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).find(task => task.id === 'tag-task-2').userId, 'alice');
+    f.client.taskStorage.saveTasks(f.guild.id, tasks.filter(task => getTaskTag(task).id !== tagId));
+    result = await interact(f, previous.custom_id);
+    assert.match(result.payload.content, /tag no longer has tasks/);
+    assert.ok(ids(result.payload).includes('kanban:list:all:0'));
+});
+
+test('adding and editing a title prefix moves its group while keeping team, owner, and status', async () => {
+    const f = fixture({ task: { createdBy: 'alice', title: '[POWER] Battery test', userId: 'alice', status: 'progress' } });
+    const team = getConfiguredTeams(f.actor)[0];
+    await interact(f, 'kanban:team:stable-task', { type: 'select', values: [team.id] });
+    const before = taskNow(f);
+    const oldTag = getTaskTag(before).id;
+    await submitEdit(f, await openEdit(f), { title: '[TEST] Battery cold test' });
+    const saved = taskNow(f);
+    assert.equal(getTaskTag(saved).name, 'TEST');
+    for (const field of ['teamId', 'teamName', 'userId', 'status', 'issueKey', 'id']) assert.equal(saved[field], before[field]);
+    assert.match((await interact(f, `kanban:list:tag:0:${oldTag}`)).payload.content, /tag no longer has tasks/);
+    assert.match((await interact(f, `kanban:list:tag:0:${getTaskTag(saved).id}`)).payload.content, /Tasks: TEST/);
+    const modal = (await interact(f, 'kanban:add')).payload;
+    assert.match(modal.toJSON().components[0].label, /\[TAG\]/);
+    await interact(f, modal.toJSON().custom_id, { type: 'modal', fields: modalFields(modal, { title: '[POWER] New battery task', description: '', priority: 'high', due: '2026-10-16', team: team.id }) });
+    const added = f.client.taskStorage.getAllTasks(f.guild.id).find(task => task.id !== saved.id);
+    assert.equal(getTaskTag(added).name, 'POWER');
+    assert.equal(added.teamId, team.id);
+    assert.equal(added.userId, null);
+    assert.equal(getTaskStatus(added), 'todo');
+    assert.match((await interact(f, `kanban:list:tag:0:${oldTag}`)).payload.content, /Tasks: POWER/);
+});
+
 test('all entry points and edit submissions obey verification, guild, and channel restrictions', async () => {
     for (const entry of ['kanban:more', 'kanban:add', 'kanban:import', 'kanban:edit:stable-task', 'kanban:teamsetup:edit', 'kanban:list:available:0']) {
         const f = fixture({ manager: true, task: { createdBy: 'alice' } });
@@ -499,8 +555,8 @@ test('live board setup and task writes refresh the common buttons and preserve e
     await submitEdit(f, await openEdit(f), { title: 'Visible edited title' });
     await pending;
     assert.equal(updates.length, 3);
-    assert.ok(updates.at(-1).embeds[0].toJSON().fields.some(field => field.value.includes('Visible edited title')));
-    for (const payload of updates) assert.deepEqual(controls(payload).map(c => c.label), ['Add Task', 'Available Tasks', 'My Tasks', 'Team Tasks', 'More']);
+    assert.ok(updates.at(-1).embeds[0].toJSON().fields.some(field => field.name.includes('Visible edited title')));
+    for (const payload of updates) assert.deepEqual(controls(payload).map(c => c.label), ['Open Tasks', 'Add Task', 'My Tasks', 'Team Tasks', 'More']);
     const reload = new TaskStorage(f.client.taskStorage.tasksDir).getAllTasks(f.guild.id)[0];
     assert.equal(reload.title, 'Visible edited title');
     assert.equal(reload.userId, 'alice');

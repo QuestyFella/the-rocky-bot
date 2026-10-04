@@ -4,13 +4,21 @@ const {
 } = require('discord.js');
 const { columns, priorities, getTaskStatus, getTaskPriority, getIssueKey, claimError, releaseError, userCanManageIssue, isManager } = require('./kanban');
 const { getConfiguredTeams, getTaskTeam, listTaskTeams, maxTeams, maxTeamNameLength } = require('./teams');
+const { getTaskTag } = require('./taskTags');
 
 const pageSize = 10;
 const teamPageSize = 25;
 const short = (text, length) => String(text || '').slice(0, length);
 const button = (id, label, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
 
-function buildBoardComponents() {
+function buildBoardComponents(tagId = null) {
+    if (tagId) return [new ActionRowBuilder().addComponents(
+        button(`kanban:list:tag:0:${tagId}`, 'Open Tasks', ButtonStyle.Primary),
+        button('kanban:add', 'Add Task'),
+        button('kanban:list:mine:0', 'My Tasks'),
+        button('kanban:list:teams:0', 'Team Tasks'),
+        button('kanban:more', 'More')
+    )];
     return [new ActionRowBuilder().addComponents(
         button('kanban:add', 'Add Task', ButtonStyle.Primary),
         button('kanban:list:available:0', 'Available Tasks', ButtonStyle.Success),
@@ -35,6 +43,7 @@ function filterTasks(tasks, filter, actor, teamId = null) {
         if (filter === 'mine') return task.userId === actor.author.id && getTaskStatus(task) !== 'done';
         if (filter === 'available') return !task.userId && !claimError(actor, task);
         if (filter === 'teams') return getTaskStatus(task) !== 'done' && Boolean(getTaskTeam(task, actor)) && (!teamId || getTaskTeam(task, actor).id === teamId);
+        if (filter === 'tag') return getTaskTag(task).id === teamId;
         return true;
     });
 }
@@ -44,7 +53,8 @@ function buildTaskPicker(tasks, filter, requestedPage = 0, actor = null, teamId 
     const page = Math.max(0, Math.min(Number(requestedPage) || 0, pageCount - 1));
     const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
     const team = listTaskTeams(tasks, actor).find(team => team.id === teamId);
-    const labels = { available: 'Available Tasks', mine: 'My Tasks', all: 'All Tasks', teams: team ? `Team Tasks: ${escapeMarkdown(team.name)}` : 'Team Tasks' };
+    const tag = tasks.length ? getTaskTag(tasks[0]) : null;
+    const labels = { available: 'Available Tasks', mine: 'My Tasks', all: 'All Tasks', teams: team ? `Team Tasks: ${escapeMarkdown(team.name)}` : 'Team Tasks', tag: tag ? `Tasks: ${escapeMarkdown(tag.name)}` : 'Tag Tasks' };
     const components = [];
     if (visible.length) {
         const select = new StringSelectMenuBuilder()
@@ -144,7 +154,7 @@ function buildIssueComponents(task, actor) {
 
 function buildAddModal(teams = []) {
     const fields = [
-        ['title', 'Task title', TextInputStyle.Short, true, 200, 'What needs to be done?'],
+        ['title', 'Task title (optional [TAG] prefix)', TextInputStyle.Short, true, 200, '[POWER] Check the battery pack'],
         ['description', 'Description', TextInputStyle.Paragraph, false, 2000, 'Add context, links, or acceptance criteria'],
         ['priority', 'Priority (low, medium, high, urgent)', TextInputStyle.Short, false, 20, 'medium'],
         ['due', 'Due date (YYYY-MM-DD)', TextInputStyle.Short, false, 10, '2026-12-01']

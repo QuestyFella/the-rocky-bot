@@ -10,6 +10,7 @@ const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rocky-board-display-
 process.env.BOT_DATA_DIR = temporaryDir;
 const TaskStorage = require('../taskStorage');
 const board = require('../commands/board');
+const { getTaskTag } = require('../utils/taskTags');
 test.after(() => fs.rmSync(temporaryDir, { recursive: true, force: true }));
 let counter = 0;
 
@@ -29,10 +30,11 @@ function fixture(count = 73, { longTitles = false, mixed = false } = {}) {
 function validate(payloads, tasks) {
     const text = payloads.map(payload => {
         const embed = payload.embeds[0].toJSON();
+        const fields = embed.fields || [];
         assert.ok(embed.title.length <= 256);
-        assert.ok(embed.fields.length <= 25);
+        assert.ok(fields.length <= 25);
         assert.ok(payload.content.length <= 2000);
-        const length = embed.title.length + embed.description.length + embed.footer.text.length + embed.fields.reduce((n, field) => {
+        const length = embed.title.length + embed.description.length + embed.footer.text.length + fields.reduce((n, field) => {
             assert.ok(field.name.length <= 256);
             assert.ok(field.value.length > 0 && field.value.length <= 1024);
             return n + field.name.length + field.value.length;
@@ -41,7 +43,7 @@ function validate(payloads, tasks) {
         const ids = payload.components.flatMap(row => row.toJSON().components.map(component => component.custom_id));
         assert.equal(ids.length, new Set(ids).size);
         assert.deepEqual(payload.allowedMentions, { parse: [] });
-        return embed.fields.map(field => field.value).join('\n');
+        return fields.map(field => `${field.name}\n${field.value}`).join('\n');
     }).join('\n');
     assert.ok(!text.includes(' more'));
     for (const task of tasks) assert.equal(text.split('`' + task.issueKey + '`').length - 1, 1, `${task.issueKey} appears exactly once`);
@@ -53,20 +55,21 @@ test('all 73 tasks and full titles appear exactly once instead of a hidden-task 
     const pages = board.generateBoardMessages(f.client, f.guild.id);
     assert.ok(pages.length > 1);
     const text = validate(pages, f.tasks);
-    for (const task of f.tasks) assert.ok(text.includes(escapeMarkdown(task.title)));
-    assert.ok(text.includes('Team: Cubesat'));
+    for (const task of f.tasks) assert.ok(text.includes(escapeMarkdown(task.title.replace(/^\[STM32\]\s*/, ''))));
+    assert.ok(pages[0].embeds[0].toJSON().description.includes('Cubesat'));
     assert.ok(text.includes('<@123456789012345678>'));
-    assert.ok(text.includes('<t:'));
-    assert.match(pages[0].content, /all 73 tasks/);
+    assert.ok(text.includes('12 Oct 2026'));
+    assert.match(pages[0].embeds[0].toJSON().description, /73 tasks/);
 });
 
 test('empty boards and all four statuses fit; large and maximum-title boards retain every task', () => {
     for (const count of [0, 1, 73, 250, 1000]) {
         const f = fixture(count, { mixed: true, longTitles: true });
         const pages = board.generateBoardMessages(f.client, f.guild.id);
-        validate(pages, f.tasks);
-        assert.ok(pages.every((page, index) => pages.length === 1 || page.content.includes(`part ${index + 1}/${pages.length}`)));
-        assert.deepEqual(pages.flatMap(page => page.embeds[0].toJSON().fields).filter(field => !field.name.includes('continued')).map(field => field.name.split(' (')[0]), ['📥 To Do', '🔧 In Progress', '👀 Review', '✅ Done']);
+        const text = validate(pages, f.tasks);
+        assert.ok(pages.every((page, index) => pages.length === 1 || page.embeds[0].toJSON().title.endsWith(`${index + 1}/${pages.length}`)));
+        if (!count) assert.match(pages[0].embeds[0].toJSON().description, /No tasks yet/);
+        if (count >= 4) for (const status of ['To Do', 'In Progress', 'Review', 'Done']) assert.ok(text.includes(status));
     }
 });
 
@@ -213,8 +216,10 @@ test('a fresh process migrates legacy single-message config, then reuses all per
     const file = path.join(temporaryDir, 'kanbanBoards.json');
     const configs = JSON.parse(fs.readFileSync(file));
     delete configs[f.guild.id].messageIds;
+    delete configs[f.guild.id].sectionMessageIds;
     fs.writeFileSync(file, JSON.stringify(configs));
     const tasks = fixture(73).tasks;
+    tasks.forEach((task, i) => { task.title = `[TAG ${i % 7}] Task ${i}`; });
     f.client.taskStorage.saveTasks(f.guild.id, tasks);
     const script = `
         const fs=require('fs');
@@ -265,4 +270,105 @@ test('standalone !task displays every part without changing the saved live-board
     await board.execute(network.actor, ['board']);
     assert.equal(network.sent - sentBefore, board.generateBoardMessages(f.client, f.guild.id).length);
     assert.deepEqual(config(f), before);
+});
+
+test('overview and tag cards show every task once, with readable state, ownership, due date, and teams', () => {
+    const f = fixture(73, { mixed: true });
+    f.tasks.forEach((task, i) => {
+        task.title = i === 72 ? 'An untagged task' : `[${i % 2 ? 'POWER' : 'DECISION'}] Full task ${i}`;
+        if (i === 1) { task.teamId = 'software'; task.teamName = 'Software'; }
+    });
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    const payloads = board.generateBoardMessages(f.client, f.guild.id);
+    validate(payloads, f.tasks);
+    const overview = payloads[0].embeds[0].toJSON();
+    assert.match(overview.description, /73 tasks · 3 tags/);
+    assert.deepEqual(overview.fields.map(field => field.name), ['DECISION', 'POWER', 'General']);
+    for (const payload of payloads.slice(1)) {
+        const embed = payload.embeds[0].toJSON();
+        const expected = f.tasks.filter(task => getTaskTag(task).id === payload.tagId);
+        for (const field of embed.fields) {
+            const task = expected.find(task => field.name.includes('`' + task.issueKey + '`'));
+            assert.ok(task, 'group cards contain only their own tasks');
+            assert.ok(field.name.includes(getTaskTag(task).title));
+            assert.match(field.value, /To Do|In Progress|Review|Done/);
+            assert.match(field.value, /Urgent|High|Medium|Low/);
+            assert.match(field.value, /12 Oct 2026/);
+            assert.match(field.value, /👤/);
+            if (embed.title.startsWith('POWER')) assert.match(field.value, /Team: (Cubesat|Software)/);
+        }
+        if (embed.title.startsWith('DECISION')) assert.match(embed.description, /Team: \*\*Cubesat\*\*/);
+        assert.equal(payload.components[0].toJSON().components[0].custom_id, `kanban:list:tag:0:${payload.tagId}`);
+    }
+});
+
+test('large tag indexes and maximum-length escaped titles remain within Discord limits', () => {
+    const f = fixture(80);
+    f.tasks.forEach((task, i) => { task.title = `[TAG ${i}] ` + '*'.repeat(185); });
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    const payloads = board.generateBoardMessages(f.client, f.guild.id);
+    validate(payloads, f.tasks);
+    assert.equal(payloads.filter(payload => payload.indexTags).length, 4);
+    assert.equal(payloads.filter(payload => payload.tagId).length, 80);
+    assert.equal(payloads.filter(payload => payload.indexTags).flatMap(payload => payload.indexTags).length, 80);
+});
+
+test('tag links and message IDs survive group additions, moves, and removals without duplicates', async () => {
+    const f = fixture(3);
+    f.tasks.forEach(task => { task.title = '[POWER] ' + task.title; });
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    const network = fakeChannel(f);
+    await board.execute(network.actor, ['setup']);
+    const root = config(f).messageId;
+    const powerId = getTaskTag(f.tasks[0]).id;
+    f.tasks[0].title = '[STM32] Moved task';
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    let state = config(f);
+    assert.equal(state.messageId, root);
+    assert.equal(new Set(state.messageIds).size, state.messageIds.length);
+    const stablePowerMessage = state.sectionMessageIds[`tag:${powerId}:0`];
+    assert.notEqual(stablePowerMessage, root, 'a single-group root is not reused twice when an overview appears');
+    const tasks = [{ ...f.tasks[0], id: 'added', issueKey: 'RC-4', title: '[DECISION] New first group' }, ...f.tasks];
+    f.client.taskStorage.saveTasks(f.guild.id, tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    state = config(f);
+    assert.equal(state.sectionMessageIds[`tag:${powerId}:0`], stablePowerMessage);
+    const payloads = board.generateBoardMessages(f.client, f.guild.id);
+    const overview = network.messages.get(root).payload.embeds[0].toJSON();
+    for (const [i, field] of overview.fields.entries()) {
+        const tagId = payloads[0].indexTags[i];
+        assert.ok(field.value.includes(`/channels/${f.guild.id}/board-channel/${state.sectionMessageIds[`tag:${tagId}:0`]}`));
+    }
+    validate(state.messageIds.map(id => network.messages.get(id).payload), tasks);
+    const removedTask = tasks.shift();
+    const removedId = state.sectionMessageIds[`tag:${getTaskTag(removedTask).id}:0`];
+    f.client.taskStorage.saveTasks(f.guild.id, tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    assert.ok(network.deleted.includes(removedId));
+    assert.equal(config(f).sectionMessageIds[`tag:${powerId}:0`], stablePowerMessage);
+    assert.equal(config(f).messageId, root);
+    validate(config(f).messageIds.map(id => network.messages.get(id).payload), tasks);
+});
+
+test('unchanged boards skip edits, task changes update only affected messages, and Refresh forces all', async () => {
+    const f = fixture(3);
+    f.tasks.forEach((task, i) => { task.title = `[TAG ${i}] Title ${i}`; });
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    const network = fakeChannel(f);
+    await board.execute(network.actor, ['setup']);
+    const before = network.edits.length;
+    await board.updateBoard(f.client, f.guild.id);
+    assert.equal(network.edits.length, before);
+    f.tasks[0].description = 'Details only appear in the task view';
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    assert.equal(network.edits.length, before);
+    f.tasks[0].status = 'progress';
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    assert.equal(network.edits.length - before, 2, 'only the overview and changed tag are edited');
+    const afterChange = network.edits.length;
+    await board.updateBoard(f.client, f.guild.id, { force: true });
+    assert.equal(network.edits.length - afterChange, config(f).messageIds.length);
 });

@@ -2,18 +2,20 @@ const { EmbedBuilder, PermissionFlagsBits, MessageFlags, escapeMarkdown } = requ
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { dataPath } = require('../utils/dataPaths');
-const { buildBoardComponents, buildTaskPicker, buildTeamPicker, filterTasks } = require('../utils/boardComponents');
+const { buildTaskPicker, buildTeamPicker, filterTasks } = require('../utils/boardComponents');
 const {
     columns, priorities, normalizeColumn, normalizePriority, getTaskStatus, getTaskPriority,
     getIssueKey, sortBoardTasks, setTaskStatus, userCanManageIssue, claimError, releaseError
 } = require('../utils/kanban');
 const { getConfiguredTeams, getTaskTeam, validateTeam, setTaskTeam, preserveTaskTeam } = require('../utils/teams');
+const { renderBoard } = require('../utils/boardDisplay');
 
 const boardConfigFile = dataPath('kanbanBoards.json');
 const legacyBoardConfigFile = dataPath('jiraBoards.json');
 const kanbanBlue = 0x0052cc;
 let boardConfigCache = null;
 const boardUpdates = new Map();
+const boardMessagePayloads = new Map();
 
 function loadBoardConfigs() {
     if (boardConfigCache) {
@@ -156,64 +158,11 @@ function getIssueDisplayKey(task, displayIndex) {
     return getIssueKey(task) || `#${displayIndex + 1}`;
 }
 
-function formatIssueLine(task, displayIndex, actor) {
-    const priority = priorities[getTaskPriority(task)];
-    const due = formatDueDate(task.dueDate);
-    const team = getTaskTeam(task, actor);
-    const details = [team ? `Team: ${escapeMarkdown(team.name)}` : '', formatAssignee(task), due].filter(Boolean).join(' - ');
-    const title = escapeMarkdown(task.title || 'Untitled task');
-    const issueKey = getIssueDisplayKey(task, displayIndex);
-    return `\`${issueKey}\` ${priority.icon} **${title}**${details ? ` - ${details}` : ''}`;
-}
-
-function buildColumnFields(column, columnTasks, displayTasks, actor) {
-    const chunks = [];
-    let value = '';
-    for (const task of columnTasks) {
-        const index = displayTasks.findIndex(item => item.id === task.id);
-        const line = formatIssueLine(task, index, actor);
-        if (value && value.length + 1 + line.length > 1024) { chunks.push(value); value = ''; }
-        // Preserve older tasks with unusually long text, including Unicode.
-        for (const character of (value ? '\n' : '') + line) {
-            if (value.length + character.length > 1024) { chunks.push(value); value = ''; }
-            value += character;
-        }
-    }
-    if (value) chunks.push(value);
-    if (!chunks.length) chunks.push('No issues.');
-    return chunks.map((value, index) => ({ name: `${column.icon} ${column.name} (${columnTasks.length})${index ? ' · continued' : ''}`, value, inline: false }));
-}
-
 function generateBoardMessages(client, guildId, guildName = 'Server') {
     const guild = client.guilds.cache.get(guildId);
     const { config } = guild ? getBoardConfig(guild, false) : { config: { title: `${guildName} Kanban Board` } };
     const tasks = client.taskStorage.getAllTasks(guildId);
-    const displayTasks = sortBoardTasks(tasks);
-    const activeCount = tasks.filter(task => getTaskStatus(task) !== 'done').length;
-    const doneCount = tasks.length - activeCount;
-
-    const title = truncate(config.title || `${guildName} Kanban Board`, 220);
-    const description = `${activeCount} active task(s), ${doneCount} done.\nClick **Available Tasks** to claim work, **My Tasks** for your tasks, or **Team Tasks** to choose a group.`;
-    const footer = 'Claim assigns a task to you · Start Work also moves it to In Progress';
-    const pages = [[]];
-    const overhead = title.length + description.length + footer.length + 100;
-    let length = overhead;
-    for (const column of columns) {
-        const columnTasks = displayTasks.filter(task => getTaskStatus(task) === column.id);
-        for (const field of buildColumnFields(column, columnTasks, displayTasks, guild ? { client, guild } : null)) {
-            const size = field.name.length + field.value.length;
-            if (pages.at(-1).length >= 25 || length + size > 5800) { pages.push([]); length = overhead; }
-            pages.at(-1).push(field);
-            length += size;
-        }
-    }
-    return pages.map((fields, index) => ({
-        content: pages.length > 1 ? `**Board part ${index + 1}/${pages.length}** — all ${tasks.length} tasks are listed across these messages.` : '',
-        embeds: [new EmbedBuilder().setColor(kanbanBlue)
-            .setTitle(`${title}${pages.length > 1 ? ` · ${index + 1}/${pages.length}` : ''}`).setDescription(description)
-            .addFields(fields).setFooter({ text: footer }).setTimestamp()],
-        components: buildBoardComponents(), allowedMentions: { parse: [] }
-    }));
+    return renderBoard(tasks, config.title || `${guildName} Kanban Board`, guild ? { client, guild } : null);
 }
 
 function generateBoardEmbed(client, guildId, guildName = 'Server') {
@@ -431,14 +380,26 @@ function buildIssueEmbed(task, displayIndex, actor = null) {
 }
 
 function boardPartPayload(payloads, index, guildId, channelId, messageIds) {
+    const { sectionKey, tagId, indexTags, ...payload } = payloads[index];
     const links = [];
-    for (const [label, page] of [['Previous part', index - 1], ['Next part', index + 1]]) {
+    const link = (label, page) => {
         if (messageIds[page] && page < payloads.length) links.push(`[${label}](https://discord.com/channels/${guildId}/${channelId}/${messageIds[page]})`);
+    };
+    link(payloads[index - 1]?.tagId === tagId ? 'Previous part' : 'Previous group', index - 1);
+    if (index > 0 && payloads[0].indexTags) link('Overview', 0);
+    link(payloads[index + 1]?.tagId === tagId ? 'Next part' : 'Next group', index + 1);
+    if (indexTags) {
+        const data = payload.embeds[0].toJSON();
+        data.fields = data.fields.map((field, fieldIndex) => {
+            const page = payloads.findIndex(part => part.tagId === indexTags[fieldIndex]);
+            return { ...field, value: field.value + (messageIds[page] ? `\n[View tasks](https://discord.com/channels/${guildId}/${channelId}/${messageIds[page]})` : '') };
+        });
+        payload.embeds = [new EmbedBuilder(data)];
     }
-    return { ...payloads[index], content: [payloads[index].content, links.join(' · ')].filter(Boolean).join('\n') };
+    return { ...payload, content: links.join(' · ') };
 }
 
-async function syncBoard(client, guildId) {
+async function syncBoard(client, guildId, force = false) {
     const configs = loadBoardConfigs();
     const config = configs[guildId];
 
@@ -452,9 +413,22 @@ async function syncBoard(client, guildId) {
 
         const guild = client.guilds.cache.get(guildId);
         const payloads = generateBoardMessages(client, guildId, guild ? guild.name : 'Server');
-        const messageIds = config.messageIds?.length ? [...config.messageIds] : [config.messageId];
+        const trackedIds = new Set(config.messageIds?.length ? config.messageIds : [config.messageId]);
+        const usedIds = new Set();
+        const messageIds = payloads.map((payload, index) => {
+            const id = index === 0 ? config.messageId : config.sectionMessageIds ? config.sectionMessageIds[payload.sectionKey] : config.messageIds?.[index];
+            if (!id || usedIds.has(id)) return undefined;
+            usedIds.add(id);
+            return id;
+        });
+        const sections = {};
         const messages = [];
-        const persistIds = () => { config.messageId = messageIds[0]; config.messageIds = [...messageIds]; saveBoardConfigs(configs); };
+        const persistIds = () => {
+            config.messageId = messageIds[0];
+            config.messageIds = [...new Set([...messageIds.filter(Boolean), ...trackedIds])];
+            config.sectionMessageIds = { ...config.sectionMessageIds, ...sections };
+            saveBoardConfigs(configs);
+        };
         for (let index = 0; index < payloads.length; index++) {
             let message;
             if (messageIds[index]) {
@@ -462,34 +436,48 @@ async function syncBoard(client, guildId) {
                 catch (error) { if (error.code !== 10008) throw error; }
             }
             if (!message) {
-                message = await channel.send({ ...payloads[index], flags: MessageFlags.SuppressNotifications });
+                message = await channel.send({ ...boardPartPayload(payloads, index, guildId, config.channelId, messageIds), flags: MessageFlags.SuppressNotifications });
                 messageIds[index] = message.id;
+                trackedIds.add(message.id);
+                sections[payloads[index].sectionKey] = message.id;
                 // Record each sent message immediately so a later failure can retry it.
                 persistIds();
             }
+            sections[payloads[index].sectionKey] = message.id;
             messages.push(message);
         }
-        for (let index = 0; index < messages.length; index++) await messages[index].edit(boardPartPayload(payloads, index, guildId, config.channelId, messageIds));
+        for (let index = 0; index < messages.length; index++) {
+            const payload = boardPartPayload(payloads, index, guildId, config.channelId, messageIds);
+            const fingerprint = JSON.stringify({ ...payload, embeds: payload.embeds.map(embed => embed.toJSON()), components: payload.components.map(row => row.toJSON()) });
+            const cacheKey = `${guildId}:${messages[index].id}`;
+            if (force || boardMessagePayloads.get(cacheKey) !== fingerprint) {
+                await messages[index].edit(payload);
+                boardMessagePayloads.set(cacheKey, fingerprint);
+            }
+        }
         // Only remove messages created for this board, when its task list shrinks.
-        while (messageIds.length > payloads.length) {
-            const id = messageIds.at(-1);
+        for (const id of [...trackedIds].filter(id => !messageIds.includes(id))) {
             try {
                 const message = await channel.messages.fetch(id);
                 if (message.author.id !== client.user.id) throw new Error('Refusing to remove a board message owned by another user.');
                 await message.delete();
             } catch (error) { if (error.code !== 10008) throw error; }
-            messageIds.pop();
+            trackedIds.delete(id);
+            boardMessagePayloads.delete(`${guildId}:${id}`);
             persistIds();
         }
-        if (!config.messageIds) persistIds();
+        if (JSON.stringify(config.messageIds) !== JSON.stringify(messageIds) || JSON.stringify(config.sectionMessageIds) !== JSON.stringify(sections)) {
+            config.messageId = messageIds[0]; config.messageIds = messageIds; config.sectionMessageIds = sections;
+            saveBoardConfigs(configs);
+        }
     } catch (error) {
         console.error(`Failed to update Kanban board for guild ${guildId}:`, error);
     }
 }
 
-function updateBoard(client, guildId) {
+function updateBoard(client, guildId, { force = false } = {}) {
     // Task changes, refresh clicks, and the timer share one update per server.
-    const update = (boardUpdates.get(guildId) || Promise.resolve()).then(() => syncBoard(client, guildId));
+    const update = (boardUpdates.get(guildId) || Promise.resolve()).then(() => syncBoard(client, guildId, force));
     boardUpdates.set(guildId, update);
     update.finally(() => { if (boardUpdates.get(guildId) === update) boardUpdates.delete(guildId); }).catch(() => {});
     return update;
@@ -535,7 +523,11 @@ module.exports = {
         }
 
         if (['board', 'list', 'show'].includes(subcommand)) {
-            for (const payload of generateBoardMessages(message.client, message.guild.id, message.guild.name)) await message.channel.send(payload);
+            const payloads = generateBoardMessages(message.client, message.guild.id, message.guild.name);
+            const messages = [];
+            for (const [index] of payloads.entries()) messages.push(await message.channel.send(boardPartPayload(payloads, index, message.guild.id, message.channel.id, [])));
+            const ids = messages.map(item => item?.id);
+            for (const [index, item] of messages.entries()) if (item?.edit) await item.edit(boardPartPayload(payloads, index, message.guild.id, message.channel.id, ids));
             return;
         }
 
@@ -573,13 +565,14 @@ module.exports = {
 
             getBoardConfig(message.guild, true);
             const payloads = generateBoardMessages(message.client, message.guild.id, message.guild.name);
-            const sentMessage = await message.channel.send(payloads[0]);
+            const sentMessage = await message.channel.send(boardPartPayload(payloads, 0, message.guild.id, message.channel.id, []));
             const configs = loadBoardConfigs();
             configs[message.guild.id] = {
                 ...configs[message.guild.id],
                 channelId: message.channel.id,
                 messageId: sentMessage.id,
-                messageIds: [sentMessage.id]
+                messageIds: [sentMessage.id],
+                sectionMessageIds: { [payloads[0].sectionKey]: sentMessage.id }
             };
             saveBoardConfigs(configs);
             if (payloads.length > 1) await updateBoard(message.client, message.guild.id);
@@ -591,7 +584,7 @@ module.exports = {
                 return message.reply('You need Manage Guild permissions to refresh the live board.');
             }
 
-            await updateBoard(message.client, message.guild.id);
+            await updateBoard(message.client, message.guild.id, { force: true });
             return message.reply('Live Kanban board refreshed.');
         }
 

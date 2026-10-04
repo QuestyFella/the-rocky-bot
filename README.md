@@ -5,7 +5,7 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 ## Features
 
 - Live-updating Kanban board using embeds
-- Every task appears on the board; larger boards continue across linked messages
+- Every task appears on the board, grouped by title tags with an overview and linked messages
 - Buttons, task pickers, and Add Task / Edit Task forms
 - Import a pasted list or text file, review a preview, then save the whole batch
 - Claim, Start Work, Release, and status changes without typing commands
@@ -37,7 +37,11 @@ Run `!task` (or ask a server manager to run `!task setup` once for a live board)
 
 The shared board shows Add Task, Available Tasks, My Tasks, Team Tasks, and More. **More** opens a private menu: everyone sees Browse Tasks and Add Task; members with **Administrator** or **Manage Server** permission also see Import Tasks, Setup Teams, and Refresh Board. Task controls appear only when you can use them. Permissions are checked again when you click or save, including on older messages.
 
-The live board lists every task, grouped by status, with its full title, priority, team, assignee, and due date. Larger boards span several messages to fit Discord's message limits. Previous/Next part links connect them; each part has the same task buttons. All parts refresh after task changes. Extra parts are added or removed as the board grows or shrinks, and a deleted part is recreated automatically.
+The live board groups tasks by the **[TAG]** at the start of their title, such as `[POWER] Check the battery pack` or `[STM32] Pin map`. Tags ignore case and extra spaces. Tasks without a tag appear under **General**. Tags describe the work; the separate **Team** label still shows which group it is meant for.
+
+With multiple tags, a short overview shows task counts, progress, and **View tasks** links to each group. Each group has its own message with the tag and team at the top, followed by task cards showing the full title, status, priority, due date, and owner. If a group contains different teams, each task shows its own team. **Open Tasks** opens a private task picker for that tag, including completed tasks. Add or change a `[TAG]` prefix through **Add Task** or **Edit Task** to move a task into a group.
+
+Large groups continue across linked messages so every task remains visible. Previous/Next group links and an Overview link connect them. Task changes update the affected messages; adding a group keeps existing group links, and a deleted message is recreated automatically. **Refresh Board** forces every message to refresh.
 
 Task pickers and task controls opened from the board are visible only to the person who clicked. Task pages show 10 entries with full titles, team, priority, status, and due date above the dropdown. Choose a task to read its full description and use its controls. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim. Edit forms expire after 15 minutes or a restart, and detect changes to task details made while the form was open. Assignment, status, and team changes made during an edit are preserved.
 
