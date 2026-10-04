@@ -1,7 +1,7 @@
 const { MessageFlags, PermissionFlagsBits } = require('discord.js');
 const board = require('../commands/board');
 const { canRunInChannel, getCachedServerConfig } = require('./serverConfig');
-const { buildBoardComponents, buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks } = require('./boardComponents');
+const { buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks } = require('./boardComponents');
 const { sortBoardTasks, getIssueKey, normalizePriority, normalizeColumn, userCanManageIssue, claimError, releaseError, setTaskStatus, isManager } = require('./kanban');
 const { getConfiguredTeams, saveTeams, validateTeam, listTaskTeams, setTaskTeam, preserveTaskTeam } = require('./teams');
 const { readImportInput, prepareImport, getImportDraft, commitImport } = require('./taskImport');
@@ -206,7 +206,6 @@ async function handleBoardInteraction(interaction) {
             return true;
         }
         await board.updateBoard(interaction.client, interaction.guildId);
-        if (!interaction.message.flags.has(MessageFlags.Ephemeral)) await interaction.message.edit({ embeds: [board.generateBoardEmbed(interaction.client, interaction.guildId)], components: buildBoardComponents(), allowedMentions: { parse: [] } });
         await interaction.editReply(buildMoreMenu(actor, 'Board refreshed.'));
         return true;
     }

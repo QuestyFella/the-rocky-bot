@@ -5,6 +5,7 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 ## Features
 
 - Live-updating Kanban board using embeds
+- Every task appears on the board; larger boards continue across linked messages
 - Buttons, task pickers, and Add Task / Edit Task forms
 - Import a pasted list or text file, review a preview, then save the whole batch
 - Claim, Start Work, Release, and status changes without typing commands
@@ -35,6 +36,8 @@ Run `!task` (or ask a server manager to run `!task setup` once for a live board)
 6. Click **Edit Task** in a task's details to change its title, description, priority, or due date. The form is prefilled; leaving description or due date blank clears it. The creator, assignee, and server managers can edit tasks, as can members of an explicitly assigned role.
 
 The shared board shows Add Task, Available Tasks, My Tasks, Team Tasks, and More. **More** opens a private menu: everyone sees Browse Tasks and Add Task; members with **Administrator** or **Manage Server** permission also see Import Tasks, Setup Teams, and Refresh Board. Task controls appear only when you can use them. Permissions are checked again when you click or save, including on older messages.
+
+The live board lists every task, grouped by status, with its full title, priority, team, assignee, and due date. Larger boards span several messages to fit Discord's message limits. Previous/Next part links connect them; each part has the same task buttons. All parts refresh after task changes. Extra parts are added or removed as the board grows or shrinks, and a deleted part is recreated automatically.
 
 Task pickers and task controls opened from the board are visible only to the person who clicked. Task pages show 10 entries with full titles, team, priority, status, and due date above the dropdown. Choose a task to read its full description and use its controls. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim. Edit forms expire after 15 minutes or a restart, and detect changes to task details made while the form was open. Assignment, status, and team changes made during an edit are preserved.
 
