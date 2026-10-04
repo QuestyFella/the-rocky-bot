@@ -10,7 +10,7 @@ process.env.BOT_DATA_DIR = temporaryDir;
 const TaskStorage = require('../taskStorage');
 const board = require('../commands/board');
 const { handleBoardInteraction } = require('../utils/boardInteractions');
-const { buildTaskPicker, buildIssueComponents, buildBoardComponents, buildAddModal, buildTeamSetup, buildTeamSetupModal, buildTeamPicker, filterTasks } = require('../utils/boardComponents');
+const { buildTaskPicker, buildIssueComponents, buildBoardComponents, buildAddModal, buildTeamSetup, buildTeamSetupModal, buildTeamPicker, filterTasks, pageSize } = require('../utils/boardComponents');
 const { claimError, releaseError, getTaskStatus } = require('../utils/kanban');
 const { getConfiguredTeams, saveTeams, validateTeam, getTaskTeam, listTaskTeams, setTaskTeam, maxTeams, maxTeamNameLength } = require('../utils/teams');
 const { loadServerConfig } = require('../utils/serverConfig');
@@ -129,7 +129,7 @@ test('component payloads respect Discord limits and paginate every task', () => 
     const f = fixture();
     const tasks = Array.from({ length: 61 }, (_, index) => ({ ...f.task, id: String(index), title: 'x'.repeat(300) }));
     const seen = [];
-    for (let page = 0; page < 3; page++) {
+    for (let page = 0; page < Math.ceil(tasks.length / pageSize); page++) {
         const payload = buildTaskPicker(tasks, 'all', page);
         const rows = payload.components.map(row => row.toJSON());
         const options = rows[0].components[0].options;
@@ -419,9 +419,9 @@ test('team forms and controls fit Discord limits, and pagination preserves the s
     f.interaction.customId = `kanban:list:teams:2:${teams[0].id}`;
     await handleBoardInteraction(f.interaction);
     const page = f.responses.at(-1)[1];
-    assert.match(page.content, /Team 0.*61 task.*Page 3\/3/);
-    assert.equal(page.components[1].toJSON().components[0].custom_id, `kanban:list:teams:1:${teams[0].id}`);
-    assert.equal(page.components[0].toJSON().components[0].options.length, 11);
+    assert.match(page.content, /Team 0.*61 task.*Page 3\/7/);
+    assert.equal(page.components[1].toJSON().components[0].custom_id, `kanban:page:teams:1:${teams[0].id}`);
+    assert.equal(page.components[0].toJSON().components[0].options.length, 10);
     const oldTeams = Array.from({ length: 61 }, (_, i) => ({ ...f.task, id: `old-${i}`, teamId: `old-team-${i}`, teamName: `Old Team ${i}` }));
     saveTeams(f.actor, []);
     const seen = [];
@@ -475,4 +475,61 @@ test('long team names with Markdown characters fit setup messages and remain lit
     assert.ok(buildTeamSetupModal(f.actor).toJSON().components[0].component.value.length <= maxTeams * (maxTeamNameLength + 1));
     const task = tagged(f.task, teams[0]);
     assert.match(board.buildIssueEmbed(task, 0).toJSON().fields.find(field => field.name === 'Team').value, /\\\*/);
+});
+
+test('every task page has unique component IDs across navigation and view shortcuts', () => {
+    const f = fixture();
+    const [team] = configureTeams(f, ['Cubesat']);
+    const tasks = Array.from({ length: 73 }, (_, i) => tagged({ ...f.task, id: String(i) }, team));
+    for (const filter of ['available', 'mine', 'all', 'teams']) {
+        for (let page = 0; page < Math.ceil(tasks.length / pageSize); page++) {
+            const payload = buildTaskPicker(tasks, filter, page, f.actor, filter === 'teams' ? team.id : null);
+            const ids = payload.components.flatMap(row => row.toJSON().components.map(component => component.custom_id));
+            assert.equal(new Set(ids).size, ids.length, `${filter} page ${page + 1}`);
+            assert.ok(ids.every(id => id.length <= 100));
+        }
+    }
+});
+
+test('Available Tasks Next and Previous work through interactions and clamp a stale page after tasks change', async () => {
+    const f = fixture({ privateMessage: true });
+    const tasks = Array.from({ length: 73 }, (_, i) => ({ ...f.task, id: String(i), issueKey: `RC-${i + 1}` }));
+    f.client.taskStorage.saveTasks(f.guild.id, tasks);
+    f.interaction.customId = 'kanban:list:available:0';
+    await handleBoardInteraction(f.interaction);
+    let payload = f.responses.at(-1)[1];
+    assert.match(payload.content, /Page 1\/8/);
+    f.interaction.customId = payload.components[1].toJSON().components[1].custom_id;
+    assert.equal(f.interaction.customId, 'kanban:page:available:1');
+    await handleBoardInteraction(f.interaction);
+    payload = f.responses.at(-1)[1];
+    assert.match(payload.content, /Page 2\/8/);
+    assert.equal(payload.components[0].toJSON().components[0].options[0].value, '10');
+    const ids = payload.components.flatMap(row => row.toJSON().components.map(component => component.custom_id));
+    assert.equal(new Set(ids).size, ids.length);
+    f.interaction.customId = payload.components[1].toJSON().components[0].custom_id;
+    await handleBoardInteraction(f.interaction);
+    assert.match(f.responses.at(-1)[1].content, /Page 1\/8/);
+    f.client.taskStorage.saveTasks(f.guild.id, tasks.map(task => ({ ...task, completed: true })));
+    f.interaction.customId = 'kanban:page:available:7';
+    await handleBoardInteraction(f.interaction);
+    assert.match(f.responses.at(-1)[1].content, /0 task/);
+    assert.deepEqual(f.responses.at(-1)[1].embeds, []);
+});
+
+test('task pages display complete valid titles with team and due date and fit the embed limits', () => {
+    const f = fixture();
+    const [team] = configureTeams(f, ['*'.repeat(50)]);
+    const tasks = Array.from({ length: 10 }, (_, i) => tagged({ ...f.task, id: String(i), title: String(i) + 'x'.repeat(199), dueDate: '2026-10-12' }, team));
+    const payload = buildTaskPicker(tasks, 'all', 0, f.actor);
+    const embed = payload.embeds[0].toJSON();
+    assert.equal(embed.fields.length, 10);
+    for (const [i, field] of embed.fields.entries()) {
+        assert.ok(field.name.endsWith(tasks[i].title));
+        assert.ok(field.name.length <= 256);
+        assert.ok(field.value.length <= 1024);
+        assert.match(field.value, /2026-10-12/);
+    }
+    assert.ok(embed.fields.reduce((length, field) => length + field.name.length + field.value.length, 0) <= 6000);
+    assert.match(payload.content, /read its description/);
 });

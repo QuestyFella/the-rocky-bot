@@ -33,7 +33,7 @@ Run `!task` (or ask a server manager to run `!task setup` once for a live board)
 4. Click **Release** to return your task to To Do for someone else to claim.
 5. Click **Team Tasks**, choose a group, and see its active tasks, including tasks claimed by teammates.
 
-Task pickers and task controls opened from the board are visible only to the person who clicked. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim.
+Task pickers and task controls opened from the board are visible only to the person who clicked. Task pages show 10 entries with full titles, team, priority, status, and due date above the dropdown. Choose a task to read its full description and use its controls. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim.
 
 ### Setting up teams
 

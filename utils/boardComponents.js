@@ -1,11 +1,12 @@
 const {
     ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
-    ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, FileUploadBuilder, escapeMarkdown
+    ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, FileUploadBuilder, EmbedBuilder, escapeMarkdown
 } = require('discord.js');
 const { columns, priorities, getTaskStatus, getTaskPriority, getIssueKey, claimError, releaseError, userCanManageIssue } = require('./kanban');
 const { getConfiguredTeams, getTaskTeam, listTaskTeams, maxTeams, maxTeamNameLength } = require('./teams');
 
-const pageSize = 25;
+const pageSize = 10;
+const teamPageSize = 25;
 const short = (text, length) => String(text || '').slice(0, length);
 const button = (id, label, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
 
@@ -52,8 +53,8 @@ function buildTaskPicker(tasks, filter, requestedPage = 0, actor = null, teamId 
     }
     if (pageCount > 1) {
         components.push(new ActionRowBuilder().addComponents(
-            button(`kanban:list:${filter}:${page - 1}${teamId ? `:${teamId}` : ''}`, 'Previous').setDisabled(page === 0),
-            button(`kanban:list:${filter}:${page + 1}${teamId ? `:${teamId}` : ''}`, 'Next').setDisabled(page === pageCount - 1)
+            button(`kanban:page:${filter}:${page - 1}${teamId ? `:${teamId}` : ''}`, 'Previous').setDisabled(page === 0),
+            button(`kanban:page:${filter}:${page + 1}${teamId ? `:${teamId}` : ''}`, 'Next').setDisabled(page === pageCount - 1)
         ));
     }
     components.push(new ActionRowBuilder().addComponents(
@@ -63,20 +64,29 @@ function buildTaskPicker(tasks, filter, requestedPage = 0, actor = null, teamId 
         button('kanban:list:all:0', 'Browse Tasks'),
         button('kanban:add', 'Add Task', ButtonStyle.Primary)
     ));
+    const embeds = [];
+    if (visible.length) {
+        const embed = new EmbedBuilder().setColor(0x0052cc);
+        for (const task of visible) embed.addFields({
+            name: `${short(getIssueKey(task) || task.id, 40)}: ${short(task.title, 200)}`,
+            value: `**Team:** ${escapeMarkdown(getTaskTeam(task, actor)?.name || 'No team')} · **Priority:** ${priorities[getTaskPriority(task)].label}\n**Status:** ${columns.find(column => column.id === getTaskStatus(task)).name} · **Due:** ${task.dueDate || 'None'}`
+        });
+        embeds.push(embed);
+    }
     return {
-        content: `**${labels[filter] || labels.all}** — ${tasks.length} task(s)${pageCount > 1 ? ` · Page ${page + 1}/${pageCount}` : ''}\n${visible.length ? 'Choose a task below.' : filter === 'teams' ? 'No active tasks for this team.' : 'No tasks here yet.'}`,
-        embeds: [], components, allowedMentions: { parse: [] }
+        content: `**${labels[filter] || labels.all}** — ${tasks.length} task(s)${pageCount > 1 ? ` · Page ${page + 1}/${pageCount}` : ''}\n${visible.length ? 'Full task titles are listed below. Choose a task to read its description or update it.' : filter === 'teams' ? 'No active tasks for this team.' : 'No tasks here yet.'}`,
+        embeds, components, allowedMentions: { parse: [] }
     };
 }
 
 function buildTeamPicker(tasks, actor, requestedPage = 0) {
     const teams = listTaskTeams(tasks, actor);
-    const pageCount = Math.max(1, Math.ceil(teams.length / pageSize));
+    const pageCount = Math.max(1, Math.ceil(teams.length / teamPageSize));
     const page = Math.max(0, Math.min(Number(requestedPage) || 0, pageCount - 1));
     const components = [];
     if (teams.length) components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
         .setCustomId('kanban:teamview').setPlaceholder('Choose the team you want to see')
-        .addOptions(teams.slice(page * pageSize, (page + 1) * pageSize).map(team => ({
+        .addOptions(teams.slice(page * teamPageSize, (page + 1) * teamPageSize).map(team => ({
             label: short(team.name, 100), value: team.id,
             description: `${filterTasks(tasks, 'teams', actor, team.id).length} active task(s)`
         })))));

@@ -147,7 +147,7 @@ async function handleBoardInteraction(interaction) {
         return true;
     }
 
-    if (['list', 'teamview', 'teamlist'].includes(action)) {
+    if (['list', 'page', 'teamview', 'teamlist'].includes(action)) {
         const allTasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
         const filter = action === 'teamview' ? 'teams' : ['available', 'mine', 'all', 'teams'].includes(target) ? target : 'all';
         const teamId = action === 'teamview' ? interaction.values?.[0] : selectedTeamId;
