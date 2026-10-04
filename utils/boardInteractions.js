@@ -8,8 +8,12 @@ const { readImportInput, prepareImport, getImportDraft, commitImport } = require
 const { buildImportPreview, buildImportErrors } = require('./importComponents');
 const { prepareEdit, saveEdit } = require('./taskEditing');
 const { groupTasksByTag } = require('./taskTags');
+const { isBlocked, canViewTask, blockingError } = require('./taskDependencies');
 
 function issuePayload(actor, task, content = '') {
+    if (!canViewTask(task, actor.client.taskStorage.getAllTasks(actor.guild.id), actor)) {
+        return buildMoreMenu(actor, content ? 'Task saved. It will appear when every prerequisite is Done.' : 'This task is blocked. It will appear when every prerequisite is Done.');
+    }
     return {
         content,
         embeds: [board.buildIssueEmbed(task, 0, actor)],
@@ -42,15 +46,17 @@ async function handleBoardInteraction(interaction) {
         member: { permissions: interaction.memberPermissions || interaction.member?.permissions || { has: () => false }, roles: { cache: interaction.member?.roles?.cache || new Set(interaction.member?.roles || []) } }
     };
     if (action === 'edit' && interaction.isButton()) {
-        const task = interaction.client.taskStorage.getAllTasks(interaction.guildId).find(task => String(task.id) === target);
+        const tasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
+        const task = tasks.find(task => String(task.id) === target);
         let error;
         if (!task) error = 'This task no longer exists. Open Browse Tasks to choose another.';
+        else if (!canViewTask(task, tasks, modalActor)) error = 'This task is blocked. Only server managers can view or manage it until its prerequisites are Done.';
         else if (!userCanManageIssue(modalActor, task)) error = 'You do not have permission to edit this task.';
         else if ((task.title || '').length > 4000 || (task.description || '').length > 4000) error = 'This task has text longer than the edit form supports. Use the text commands to edit it.';
         if (error) await interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
         else {
             const draft = prepareEdit(modalActor, task);
-            await interaction.showModal(buildEditModal(task, draft.id));
+            await interaction.showModal(buildEditModal(task, draft.id, tasks));
         }
         return true;
     }
@@ -188,9 +194,11 @@ async function handleBoardInteraction(interaction) {
 
     if (['list', 'page', 'teamview', 'teamlist'].includes(action)) {
         const allTasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
-        const filter = action === 'teamview' ? 'teams' : ['available', 'mine', 'all', 'teams', 'tag'].includes(target) ? target : 'all';
+        const filter = action === 'teamview' ? 'teams' : ['available', 'mine', 'all', 'teams', 'tag', 'blocked'].includes(target) ? target : 'all';
         const teamId = action === 'teamview' ? interaction.values?.[0] : selectedTeamId;
-        if (filter === 'tag' && !groupTasksByTag(allTasks).some(tag => tag.id === teamId)) {
+        if (filter === 'blocked' && !isManager(actor)) {
+            await replyError('Only server managers can view blocked tasks. Unlocked work appears in Available Tasks.');
+        } else if (filter === 'tag' && !groupTasksByTag(allTasks.filter(task => !isBlocked(task, allTasks))).some(tag => tag.id === teamId)) {
             await interaction.editReply(buildMoreMenu(actor, 'This tag no longer has tasks. Use Browse Tasks to see the current list.'));
         } else if (action === 'teamlist' || (filter === 'teams' && !teamId)) {
             await interaction.editReply(buildTeamPicker(allTasks, actor, action === 'teamlist' ? target : 0));
@@ -215,9 +223,14 @@ async function handleBoardInteraction(interaction) {
 
     const id = action === 'select' ? interaction.values?.[0] : target;
     // Look up stable storage IDs only; a deleted task must never resolve to a new board position.
-    const task = interaction.client.taskStorage.getAllTasks(interaction.guildId).find(item => String(item.id) === id);
+    const tasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
+    const task = tasks.find(item => String(item.id) === id);
     if (!task) {
         await replyError('This task no longer exists. Open Browse Tasks to choose another.');
+        return true;
+    }
+    if (!canViewTask(task, tasks, actor)) {
+        await replyError('This task is blocked. It will appear when every prerequisite is Done.');
         return true;
     }
 
@@ -261,6 +274,7 @@ async function handleBoardInteraction(interaction) {
         const status = normalizeColumn(interaction.values?.[0]);
         if (!userCanManageIssue(actor, task)) error = 'You do not have permission to change this task.';
         else if (!status) error = 'Choose a valid task status.';
+        else if (status !== 'todo' && blockingError(task, tasks)) error = blockingError(task, tasks);
         else {
             setTaskStatus(task, status);
             content = 'Task status updated.';

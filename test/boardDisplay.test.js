@@ -11,6 +11,7 @@ process.env.BOT_DATA_DIR = temporaryDir;
 const TaskStorage = require('../taskStorage');
 const board = require('../commands/board');
 const { getTaskTag } = require('../utils/taskTags');
+const { isBlocked } = require('../utils/taskDependencies');
 test.after(() => fs.rmSync(temporaryDir, { recursive: true, force: true }));
 let counter = 0;
 
@@ -371,4 +372,67 @@ test('unchanged boards skip edits, task changes update only affected messages, a
     const afterChange = network.edits.length;
     await board.updateBoard(f.client, f.guild.id, { force: true });
     assert.equal(network.edits.length - afterChange, config(f).messageIds.length);
+});
+
+test('the live board hides blocked tags, unlocks chains after all prerequisites finish, and reblocks unfinished work', async () => {
+    const f = fixture(5);
+    const [one, target, two, later, completed] = f.tasks;
+    one.title = '[POWER] Battery'; two.title = '[STM32] Flight software';
+    target.title = '[TEST] Full payload test'; target.dependsOn = [one.id, two.id];
+    later.title = '[TEST] Dress rehearsal'; later.dependsOn = [target.id];
+    completed.title = '[DONE] Previous work'; completed.dependsOn = [target.id]; completed.status = 'done'; completed.completed = true;
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    const network = fakeChannel(f);
+    await board.execute(network.actor, ['setup']);
+    const root = config(f).messageId;
+    const tagId = getTaskTag(target).id;
+    const check = () => {
+        const payloads = config(f).messageIds.map(id => network.messages.get(id).payload);
+        const visible = f.tasks.filter(task => !isBlocked(task, f.tasks));
+        validate(payloads, visible);
+        const text = JSON.stringify(payloads);
+        for (const hidden of f.tasks.filter(task => isBlocked(task, f.tasks))) assert.ok(!text.includes(hidden.issueKey));
+        assert.equal(config(f).messageId, root);
+    };
+    check();
+    assert.equal(config(f).sectionMessageIds[`tag:${tagId}:0`], undefined);
+    one.status = 'done'; one.completed = true;
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    check();
+    assert.equal(config(f).sectionMessageIds[`tag:${tagId}:0`], undefined);
+    two.status = 'done'; two.completed = true;
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    check();
+    const testMessage = config(f).sectionMessageIds[`tag:${tagId}:0`];
+    assert.ok(testMessage);
+    target.status = 'done'; target.completed = true;
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    check();
+    assert.equal(config(f).sectionMessageIds[`tag:${tagId}:0`], testMessage);
+    target.status = 'todo'; target.completed = false;
+    one.status = 'todo'; one.completed = false;
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    await board.updateBoard(f.client, f.guild.id);
+    check();
+    assert.ok(network.deleted.includes(testMessage));
+    assert.equal(completed.completed, true);
+    assert.deepEqual(target.dependsOn, [one.id, two.id]);
+    assert.deepEqual(later.dependsOn, [target.id]);
+});
+
+test('an entirely blocked board shows an empty state without leaking task titles or creating an empty tag', () => {
+    const f = fixture(3);
+    f.tasks.forEach(task => { task.dependsOn = ['deleted-prerequisite']; });
+    const before = JSON.stringify(f.tasks);
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    const payloads = board.generateBoardMessages(f.client, f.guild.id);
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0].sectionKey, 'empty');
+    assert.match(payloads[0].embeds[0].toJSON().description, /No unlocked tasks/);
+    validate(payloads, []);
+    for (const task of f.tasks) assert.ok(!JSON.stringify(payloads).includes(task.issueKey));
+    assert.equal(JSON.stringify(f.tasks), before);
 });

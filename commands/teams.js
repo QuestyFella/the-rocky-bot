@@ -10,6 +10,7 @@ module.exports = {
             if (!isManager(message)) return message.reply('You need Manage Server permission to set up teams.');
             return message.reply({ content: 'Click **More**, then **Setup Teams** to open your private manager controls.', components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('kanban:more').setLabel('More').setStyle(ButtonStyle.Secondary))], allowedMentions: { parse: [] } });
         }
-        return message.channel.send(buildTeamPicker(message.client.taskStorage.getAllTasks(message.guild.id), message));
+        const actor = { client: message.client, guild: message.guild, member: message.member, author: message.author, publicList: true };
+        return message.channel.send(buildTeamPicker(message.client.taskStorage.getAllTasks(message.guild.id), actor));
     }
 };

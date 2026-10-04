@@ -71,8 +71,10 @@ function userCanManageIssue(actor, task) {
         || Boolean(task.assignedToRole && actor.member.roles.cache.has(task.assignedToRole));
 }
 
-function claimError(actor, task) {
+function claimError(actor, task, tasks = actor.client?.taskStorage?.getAllTasks(actor.guild.id) || []) {
     if (getTaskStatus(task) === 'done') return 'This task is done. Reopen it before claiming it.';
+    const blocked = require('./taskDependencies').blockingError(task, tasks);
+    if (blocked) return blocked;
     if (task.userId && task.userId !== actor.author.id) return 'Someone else has already claimed this task.';
     if (task.assignedToRole && !actor.member.roles.cache.has(task.assignedToRole) && !isManager(actor)) {
         return 'This task is reserved for members of its assigned role.';

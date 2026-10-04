@@ -3,6 +3,7 @@ const { columns, priorities, getTaskStatus, getTaskPriority, getIssueKey, sortBo
 const { getTaskTeam } = require('./teams');
 const { getTaskTag, groupTasksByTag } = require('./taskTags');
 const { buildBoardComponents } = require('./boardComponents');
+const { isBlocked } = require('./taskDependencies');
 
 const blue = 0x0052cc;
 const dueFormat = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
@@ -51,12 +52,13 @@ function packFields(fields, overhead, maxFields, extraPerField = 0) {
 }
 
 function renderBoard(tasks, title, actor) {
-    const groups = groupTasksByTag(tasks);
+    const visibleTasks = tasks.filter(task => !isBlocked(task, tasks));
+    const groups = groupTasksByTag(visibleTasks);
     const displayTasks = sortBoardTasks(tasks);
     const indexes = new Map(displayTasks.map((task, index) => [task.id, index]));
     const result = [];
     if (groups.length > 1) {
-        const description = `**${tasks.length} tasks · ${groups.length} tags**\n${statusCounts(tasks).map(column => `${column.icon} ${column.name}: **${column.count}**`).join(' · ')}\n\nJump to a tag below. Use **Available Tasks** to claim work or **My Tasks** to find your assignments.`;
+        const description = `**${visibleTasks.length} tasks · ${groups.length} tags**\n${statusCounts(visibleTasks).map(column => `${column.icon} ${column.name}: **${column.count}**`).join(' · ')}\n\nJump to a tag below. Use **Available Tasks** to claim work or **My Tasks** to find your assignments.`;
         const fields = groups.map(group => ({ name: escapeMarkdown(group.name), value: `${group.tasks.length} tasks · ${group.tasks.filter(task => getTaskStatus(task) === 'done').length} done`, inline: true }));
         const pages = packFields(fields, title.length + description.length + 200, 25, 160);
         let offset = 0;
@@ -72,7 +74,7 @@ function renderBoard(tasks, title, actor) {
     }
     if (!groups.length) return [{
         sectionKey: 'empty', content: '', embeds: [new EmbedBuilder().setColor(blue).setTitle(title.slice(0, 220))
-            .setDescription('No tasks yet. Click **Add Task** to get started. Use a title like **[POWER] Check the battery pack** to group related work.')
+            .setDescription(tasks.length ? 'No unlocked tasks to show. More work will appear when its prerequisites are Done. Server managers can open **More → Blocked Tasks** to review what is waiting.' : 'No tasks yet. Click **Add Task** to get started. Use a title like **[POWER] Check the battery pack** to group related work.')
             .setFooter({ text: 'Everyone can add a task. Team labels are optional.' })],
         components: buildBoardComponents(), allowedMentions: { parse: [] }
     }];
