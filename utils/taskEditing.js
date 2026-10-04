@@ -1,9 +1,9 @@
 const { randomUUID } = require('crypto');
 const { normalizePriority, getTaskPriority, userCanManageIssue } = require('./kanban');
-const { dependencyIds, resolveDependencies, canViewTask } = require('./taskDependencies');
+const { dependencyIds, dependencyTags, resolveDependencies, validateDependencyGraph, canViewTask } = require('./taskDependencies');
 
 const editLifetimeMs = 15 * 60 * 1000;
-const editableDetails = task => [task.title || '', task.description || '', getTaskPriority(task), task.dueDate || '', JSON.stringify(dependencyIds(task).sort())];
+const editableDetails = task => [task.title || '', task.description || '', getTaskPriority(task), task.dueDate || '', JSON.stringify([dependencyIds(task).sort(), dependencyTags(task).sort()])];
 
 function prepareEdit(actor, task) {
     const drafts = actor.client.taskEdits ||= new Map();
@@ -45,17 +45,20 @@ function saveEdit(actor, id, fields) {
     }
     if (!priority) return { task, error: 'Choose low, medium, high, or urgent for the priority.' };
     if (dueInput && (!/^\d{4}-\d{2}-\d{2}$/.test(dueInput) || !due.ok)) return { task, error: 'Enter a real due date in YYYY-MM-DD format, or leave it blank to clear it.' };
+    const edited = { ...task, title, description, priority, dueDate: due.dueDate, updatedAt: new Date().toISOString() };
     // Forms opened before the dependency field was added keep their prerequisites.
     if (fields.fields?.has('dependencies')) {
-        const dependencies = resolveDependencies(task, fields.getTextInputValue('dependencies'), tasks);
+        const dependencies = resolveDependencies(edited, fields.getTextInputValue('dependencies'), tasks);
         if (dependencies.error) return { task, error: dependencies.error };
-        task.dependsOn = dependencies.ids;
+        edited.dependsOn = dependencies.ids;
+        edited.dependsOnTags = dependencies.tags;
     }
-    Object.assign(task, { title, description, priority, dueDate: due.dueDate, updatedAt: new Date().toISOString() });
+    const cycle = validateDependencyGraph(edited, tasks);
+    if (cycle) return { task, error: cycle };
     // Re-read and save synchronously so another edit or claim cannot be overwritten.
-    if (!actor.client.taskStorage.updateTask(actor.guild.id, task.id, task)) return { error: 'Failed to save the task. Open the task and try editing again.' };
+    if (!actor.client.taskStorage.updateTask(actor.guild.id, task.id, edited)) return { error: 'Failed to save the task. Open the task and try editing again.' };
     actor.client.taskEdits.delete(id);
-    return { task };
+    return { task: edited };
 }
 
 module.exports = { prepareEdit, saveEdit };

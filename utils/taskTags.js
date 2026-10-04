@@ -1,10 +1,15 @@
 const { createHash } = require('crypto');
 
+function normalizeTagName(value) {
+    const name = String(value).trim().replace(/\s+/g, ' ').toUpperCase();
+    return !name || name === 'GENERAL' ? 'General' : name;
+}
+
 function getTaskTag(task) {
     const title = String(task.title || 'Untitled task');
     const match = title.match(/^\s*\[([^\[\]\r\n]{1,50})\]\s*/);
     const normalized = match?.[1].trim().replace(/\s+/g, ' ').toUpperCase();
-    const name = !normalized || normalized === 'GENERAL' ? 'General' : normalized;
+    const name = normalizeTagName(normalized || '');
     return {
         id: createHash('sha256').update(name.toUpperCase()).digest('hex').slice(0, 16),
         name,
@@ -26,4 +31,4 @@ function groupTasksByTag(tasks) {
     });
 }
 
-module.exports = { getTaskTag, groupTasksByTag };
+module.exports = { normalizeTagName, getTaskTag, groupTasksByTag };

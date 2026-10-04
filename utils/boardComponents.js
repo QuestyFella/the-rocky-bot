@@ -185,14 +185,14 @@ function buildEditModal(task, draftId, tasks = []) {
         ['description', 'Description', TextInputStyle.Paragraph, false, task.description || '', 2000],
         ['priority', 'Priority (low, medium, high, urgent)', TextInputStyle.Short, false, getTaskPriority(task), 20],
         ['due', 'Due date (YYYY-MM-DD; blank clears)', TextInputStyle.Short, false, task.dueDate || '', 10],
-        ['dependencies', 'Blocked by (task keys; blank clears)', TextInputStyle.Short, false, dependencyInput(task, tasks), 2000]
+        ['dependencies', 'Blocked by (task keys or [TAG]; blank clears)', TextInputStyle.Short, false, dependencyInput(task, tasks), 2000]
     ];
     return new ModalBuilder().setCustomId(`kanban:editsave:${draftId}`).setTitle('Edit task details')
         .addLabelComponents(fields.map(([id, label, style, required, value, maxLength]) => {
             const input = new TextInputBuilder().setCustomId(id).setStyle(style).setRequired(required).setMaxLength(Math.max(maxLength, value.length));
             if (value) input.setValue(value);
             const field = new LabelBuilder().setLabel(label).setTextInputComponent(input);
-            if (id === 'dependencies') { input.setPlaceholder('URC-12, URC-13'); field.setDescription('All prerequisites must be Done. Blocked tasks are visible only to server managers.'); }
+            if (id === 'dependencies') { input.setPlaceholder('URC-12, [POWER], [GROUND STATION]'); field.setDescription('Wait for each task and every task in each tag. Blocked tasks are visible only to managers.'); }
             return field;
         }));
 }

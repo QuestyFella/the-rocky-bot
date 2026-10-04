@@ -49,14 +49,16 @@ Task pickers and task controls opened from the board are visible only to the per
 ### Blocking tasks with prerequisites
 
 1. Open a task and click **Edit Task**.
-2. In **Blocked by**, enter task keys separated by commas, such as `URC-12, URC-13`. These tasks can belong to any tag or team in the same server. You can enter up to 20 prerequisites.
+2. In **Blocked by**, enter task keys or whole tags separated by commas, such as `URC-12, [POWER], [GROUND STATION]`. These tasks and tags can belong to any team in the same server. You can enter up to 20 prerequisites; each tag counts as one.
 3. Save. An unfinished task stays blocked until **every** prerequisite is **Done**. It then appears on the board and becomes available to claim automatically. Leave the field blank to remove its prerequisites.
+
+A tag prerequisite requires **every current task in that tag** to be Done, including blocked tasks. Tag names ignore case and extra spaces. The private blocked-task view shows tag progress, such as **3/5 Done**. Tags stay linked to their current tasks: adding a task, moving an unfinished task into the tag, or reopening a task blocks unfinished dependent work again. Moving a task out of the tag removes it from that prerequisite. An empty or missing tag keeps work blocked until tasks are added to it or a manager removes the prerequisite.
 
 The shared board hides blocked tasks for everyone. Members also cannot see them in Browse Tasks, My Tasks, Team Tasks, or through old task controls. Members with **Administrator** or **Manage Server** permission can open **More → Blocked Tasks** to review and edit them privately. Managers' private Browse Tasks and Team Tasks views also include blocked work, labeled with what it is waiting on. A member who adds unfinished prerequisites to their task will need a server manager to edit it again until it unlocks.
 
-Blocked tasks cannot be claimed, started, or moved to Review or Done, including through text commands. Reopening a prerequisite blocks its unfinished dependent tasks again; completed work keeps its history. Deleting a prerequisite leaves dependent tasks blocked until a manager removes that reference. Self references, unknown tasks, and circular dependencies are rejected.
+Blocked tasks cannot be claimed, started, or moved to Review or Done, including through text commands. Reopening a prerequisite blocks its unfinished dependent tasks again; completed work keeps its history. Deleting a prerequisite leaves dependent tasks blocked until a manager removes that reference. Self references, a task's own tag, unknown tasks or tags, and circular dependencies are rejected. Title edits also check for cycles when moving tasks between tags.
 
-The text command `!task depends URC-20 URC-12, URC-13` sets prerequisites; `!task depends URC-20 none` clears them. Blocked task details stay in the private button workflow. Existing tasks start with no prerequisites; configure the relationships you want through Edit Task.
+The text command `!task depends URC-20 URC-12, [POWER]` sets prerequisites; `!task depends URC-20 none` clears them. To wait for a whole category, use `!task depends URC-20 [STM32]`. Blocked task details stay in the private button workflow. Existing tasks start with no prerequisites; configure the relationships you want through Edit Task.
 
 ### Setting up teams
 
@@ -129,7 +131,7 @@ An import supports up to 250 tasks in a 256 KiB file; pasted form text supports 
 - `!task team [key] Team Name|none` - Set or clear the team label (names can contain spaces)
 - `!task priority [key] [low|medium|high|urgent]` - Set issue priority
 - `!task due [key] [date|none]` - Set or clear a due date
-- `!task depends [key] OTHER-1, OTHER-2|none` - Set or clear prerequisite tasks
+- `!task depends [key] OTHER-1, [TAG]|none` - Set or clear prerequisite tasks and whole tags
 - `!task edit [key] [new title]` - Rename an issue
 - `!task delete [key]` - Delete an issue
 

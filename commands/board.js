@@ -9,7 +9,7 @@ const {
 } = require('../utils/kanban');
 const { getConfiguredTeams, getTaskTeam, validateTeam, setTaskTeam, preserveTaskTeam } = require('../utils/teams');
 const { renderBoard } = require('../utils/boardDisplay');
-const { canViewTask, isBlocked, blockingError, prerequisites, taskReference, resolveDependencies } = require('../utils/taskDependencies');
+const { canViewTask, isBlocked, blockingError, prerequisites, prerequisiteDone, prerequisiteLine, resolveDependencies, validateDependencyGraph } = require('../utils/taskDependencies');
 
 const boardConfigFile = dataPath('kanbanBoards.json');
 const legacyBoardConfigFile = dataPath('jiraBoards.json');
@@ -382,13 +382,17 @@ function buildIssueEmbed(task, displayIndex, actor = null) {
     if (dependencies.length) {
         const chunks = [''];
         for (const dependency of dependencies) {
-            const line = dependency.task ? `${getTaskStatus(dependency.task) === 'done' ? '✅' : '🔒'} \`${taskReference(dependency.task)}\` · ${getTaskStatus(dependency.task) === 'done' ? 'Done' : 'Waiting'}` : `⚠️ Deleted task \`${dependency.id.slice(0, 80).replace(/`/g, '')}\` · Remove in Edit Task`;
+            const line = prerequisiteLine(dependency);
             if (chunks.at(-1).length + line.length + 1 > 1000) chunks.push('');
             chunks[chunks.length - 1] += `${chunks.at(-1) ? '\n' : ''}${line}`;
         }
-        const complete = dependencies.every(dependency => dependency.task && getTaskStatus(dependency.task) === 'done');
+        const complete = dependencies.every(prerequisiteDone);
         embed.addFields(chunks.map((value, index) => ({ name: index ? 'Prerequisites continued' : isBlocked(task, tasks) ? '🔒 Blocked by' : complete ? 'Prerequisites complete' : 'Prerequisites', value })));
     }
+
+    const data = embed.toJSON();
+    const detailsLength = data.title.length + data.fields.reduce((length, field) => length + field.name.length + field.value.length, 0);
+    if (data.description.length + detailsLength > 5900) embed.setDescription(truncate(data.description, 5900 - detailsLength));
 
     return embed;
 }
@@ -515,7 +519,7 @@ function sendUsage(message) {
             '`!task assign KEY @user` - Assign an issue.\n' +
             '`!task priority KEY high` - Set priority.\n' +
             '`!task due KEY 2026-06-01` - Set or clear a due date.\n' +
-            '`!task depends KEY OTHER-1, OTHER-2` - Wait for every prerequisite; use `none` to clear.\n' +
+            '`!task depends KEY OTHER-1, [POWER]` - Wait for tasks or whole tags; use `none` to clear.\n' +
             '`!task details KEY` - Show one issue.\n' +
             '`!task edit KEY New title` - Rename an issue.\n' +
             '`!task delete KEY` - Delete an issue.\n\n' +
@@ -559,13 +563,14 @@ module.exports = {
         }
 
         if (['depends', 'blockedby'].includes(subcommand)) {
-            if (args.length < 2) return message.reply('Usage: `!task depends KEY OTHER-1, OTHER-2` or `!task depends KEY none`');
+            if (args.length < 2) return message.reply('Usage: `!task depends KEY OTHER-1, [POWER]` or `!task depends KEY none`');
             const { tasks, task } = findTask(message, args[0]);
             if (!task) return message.reply('I could not find that task. Blocked tasks are available to server managers through More → Blocked Tasks.');
             if (!userCanManageIssue(message, task)) return message.reply('You do not have permission to edit this task.');
             const dependencies = resolveDependencies(task, args.slice(1).join(' '), tasks);
             if (dependencies.error) return message.reply(dependencies.error);
             task.dependsOn = dependencies.ids;
+            task.dependsOnTags = dependencies.tags;
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
             return message.reply(success ? `Prerequisites saved for ${getIssueKey(task) || task.id}. It will unlock when every prerequisite is Done.` : 'Failed to save prerequisites.');
@@ -840,7 +845,7 @@ module.exports = {
                 return message.reply('Usage: `!task edit KEY New title`');
             }
 
-            const { task } = findTask(message, args[0]);
+            const { tasks, task } = findTask(message, args[0]);
             if (!task) {
                 return message.reply('I could not find that issue. Use the issue key, task ID, or board number.');
             }
@@ -849,6 +854,8 @@ module.exports = {
             }
 
             task.title = args.slice(1).join(' ').trim();
+            const cycle = validateDependencyGraph(task, tasks);
+            if (cycle) return message.reply(cycle);
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
             return success ? message.reply(`Renamed ${getIssueKey(task) || task.id}.`) : message.reply('Failed to update issue.');

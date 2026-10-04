@@ -436,3 +436,48 @@ test('an entirely blocked board shows an empty state without leaking task titles
     for (const task of f.tasks) assert.ok(!JSON.stringify(payloads).includes(task.issueKey));
     assert.equal(JSON.stringify(f.tasks), before);
 });
+
+test('whole-tag prerequisites shorten the live board and update it as tag work finishes or is added', async () => {
+    const f = fixture(4);
+    const [one, target, two, launch] = f.tasks;
+    one.title = '[POWER] One'; two.title = '[POWER] Two';
+    target.title = '[TEST] Final test'; target.dependsOnTags = ['POWER'];
+    launch.title = '[LAUNCH] Launch'; launch.dependsOnTags = ['TEST'];
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    const network = fakeChannel(f);
+    await board.execute(network.actor, ['setup']);
+    const root = config(f).messageId;
+    const check = async () => {
+        f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+        await board.updateBoard(f.client, f.guild.id);
+        validate(config(f).messageIds.map(id => network.messages.get(id).payload), f.tasks.filter(task => !isBlocked(task, f.tasks)));
+        assert.equal(config(f).messageId, root);
+    };
+    assert.equal(config(f).messageIds.length, 1);
+    one.status = 'done'; one.completed = true;
+    await check();
+    assert.equal(config(f).messageIds.length, 1);
+    two.status = 'done'; two.completed = true;
+    await check();
+    const testTag = getTaskTag(target).id;
+    const originalTestMessage = config(f).sectionMessageIds[`tag:${testTag}:0`];
+    assert.ok(originalTestMessage);
+    const added = { ...one, id: 'new-power-task', issueKey: 'RC-5', title: '[POWER] Newly added', status: 'todo', completed: false };
+    f.tasks.push(added);
+    await check();
+    assert.ok(network.deleted.includes(originalTestMessage));
+    assert.equal(config(f).messageIds.length, 1);
+    added.status = 'done'; added.completed = true;
+    await check();
+    assert.ok(config(f).sectionMessageIds[`tag:${testTag}:0`]);
+    target.status = 'done'; target.completed = true;
+    await check();
+    const launchTag = getTaskTag(launch).id;
+    const launchMessage = config(f).sectionMessageIds[`tag:${launchTag}:0`];
+    assert.ok(launchMessage);
+    target.status = 'todo'; target.completed = false;
+    await check();
+    assert.ok(network.deleted.includes(launchMessage));
+    assert.deepEqual(target.dependsOnTags, ['POWER']);
+    assert.deepEqual(launch.dependsOnTags, ['TEST']);
+});
