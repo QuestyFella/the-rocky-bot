@@ -1,9 +1,11 @@
 const { MessageFlags, PermissionFlagsBits } = require('discord.js');
 const board = require('../commands/board');
 const { canRunInChannel, getCachedServerConfig } = require('./serverConfig');
-const { buildBoardComponents, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildTeamSetup, buildTeamSetupModal, filterTasks } = require('./boardComponents');
+const { buildBoardComponents, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks } = require('./boardComponents');
 const { sortBoardTasks, getIssueKey, normalizePriority, normalizeColumn, userCanManageIssue, claimError, releaseError, setTaskStatus, isManager } = require('./kanban');
 const { getConfiguredTeams, saveTeams, validateTeam, listTaskTeams, setTaskTeam, preserveTaskTeam } = require('./teams');
+const { readImportInput, prepareImport, getImportDraft, commitImport } = require('./taskImport');
+const { buildImportPreview, buildImportErrors } = require('./importComponents');
 
 function issuePayload(actor, task, content = '') {
     return {
@@ -31,6 +33,10 @@ async function handleBoardInteraction(interaction) {
     }
 
     const [, action, target, page, selectedTeamId] = interaction.customId.split(':');
+    if (action === 'import' && interaction.isButton()) {
+        await interaction.showModal(buildImportModal());
+        return true;
+    }
     if (action === 'add' && interaction.isButton()) {
         await interaction.showModal(buildAddModal(getConfiguredTeams({ client: interaction.client, guild: interaction.guild })));
         return true;
@@ -54,8 +60,49 @@ async function handleBoardInteraction(interaction) {
         await interaction.editReply({ content: 'Finish server verification before using the board.', embeds: [], components: [] });
         return true;
     }
-    const actor = { client: interaction.client, guild: interaction.guild, author: interaction.user, member };
+    const actor = { client: interaction.client, guild: interaction.guild, author: interaction.user, member, channelId: interaction.channelId };
     const replyError = content => interaction.editReply({ content, embeds: [], components: [], allowedMentions: { parse: [] } });
+
+    if (action === 'importpreview' && interaction.isModalSubmit()) {
+        let text;
+        try {
+            text = await readImportInput(interaction.fields.getTextInputValue('list'), [...(interaction.fields.getUploadedFiles('file')?.values() || [])]);
+        } catch (error) {
+            await interaction.editReply(buildImportErrors([error.message]));
+            return true;
+        }
+        const result = prepareImport(actor, text);
+        await interaction.editReply(result.errors ? buildImportErrors(result.errors) : buildImportPreview(result.draft, 0, true));
+        return true;
+    }
+
+    if (['importpage', 'importconfirm', 'importcancel'].includes(action)) {
+        const { draft, error } = getImportDraft(actor, target);
+        if (error) {
+            await replyError(error);
+            return true;
+        }
+        if (action === 'importpage') await interaction.editReply(buildImportPreview(draft, page));
+        else {
+            let payload;
+            if (action === 'importcancel') {
+                actor.client.taskImports.delete(draft.id);
+                payload = { content: 'Import cancelled. No tasks were added.', embeds: [], components: [], allowedMentions: { parse: [] } };
+            } else {
+                const result = commitImport(actor, draft);
+                if (result.error) {
+                    await interaction.editReply({ ...buildImportPreview(draft), content: result.error });
+                    return true;
+                }
+                const keys = result.created.map(task => task.issueKey);
+                payload = { content: `Imported **${keys.length} task(s)** into To Do, unassigned.${result.skipped ? ` Skipped ${result.skipped} duplicate(s).` : ''}${keys.length ? `\nIssue keys: ${keys[0]}${keys.length > 1 ? ` through ${keys.at(-1)}` : ''}.` : ''}`, embeds: [], components: [], allowedMentions: { parse: [] } };
+            }
+            // Text-command previews are public; clear their buttons after the owner finishes.
+            if (!interaction.message.flags.has(MessageFlags.Ephemeral)) await interaction.message.edit(payload);
+            await interaction.editReply(payload);
+        }
+        return true;
+    }
 
     if (action === 'teamsetup') {
         if (!isManager(actor)) {

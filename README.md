@@ -6,6 +6,7 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 
 - Live-updating Kanban board using embeds
 - Buttons, task pickers, and an Add Task form
+- Import a pasted list or text file, review a preview, then save the whole batch
 - Claim, Start Work, Release, and status changes without typing commands
 - Available Tasks and My Tasks views, with pagination for larger boards
 - Visible team labels that stay with tasks after assignment, plus a Team Tasks picker for any group
@@ -44,11 +45,49 @@ Each task has one optional team label, shown on the board, in task pickers, and 
 
 Older team tags and role-assigned tasks remain visible in **Team Tasks**, and their label is retained when someone claims them. Removing a team from setup keeps existing task labels and their browse view. Select **No team** on a task to clear its label. Team setup supports up to 24 names per server, each up to 50 characters. Reordering names keeps their task links; changing a name creates a new team, while the previous name remains on existing tasks.
 
+### Importing a task list
+
+1. Click **Import Tasks** on the board. Paste a short list, or upload the full list as a UTF-8 `.txt` or `.md` file. Use one input at a time. The form uses Discord's [file upload component](https://docs.discord.com/developers/components/reference#file-upload).
+2. Review the preview. Previous/Next shows each task's fields, and the attached preview file contains every entry and its full description.
+3. Click **Import Tasks** in the preview to save the batch. **Cancel** discards it. Tasks start unassigned in To Do, attributed to the person who imports them.
+
+You can also attach a text file to a message containing `!task import`, or paste a short list after that command. Anyone who can create tasks can import them. Only the person who submitted a list can confirm or cancel it, in the same server and channel.
+
+Use this format; blank descriptions are allowed. Numbering and section headings are optional:
+
+```text
+HAB-1 TASKS (2)
+Fields per task: Title / Description / Priority / Due date / Team
+
+========================================
+STM32
+========================================
+
+1.
+Title: [STM32] Pin map and SPI bus assignment
+Description: Add a mutex if tasks share a bus.
+Priority: high
+Due date: 2026-10-12
+Team: Cubesat
+
+2.
+Title: [STM32] Watchdog and reset-cause logging
+Description:
+Priority: high
+Due date: 2026-10-12
+Team: Cubesat
+```
+
+Team names match configured labels regardless of capitalization. Add unknown names using **Setup Teams** before importing. Only Title is required; omitted fields default to an empty description, medium priority, no due date, and no team. Descriptions can span several lines. Dates must be real calendar dates in `YYYY-MM-DD` format; blank or `none` clears an optional date or team.
+
+An import supports up to 250 tasks in a 256 KiB file; pasted form text supports 4,000 characters. Invalid entries block the whole import. Existing tasks with the same title and team are skipped, preserving their details and ownership. Duplicate entries in a file are skipped; repeated titles for the same team with conflicting details must be corrected. A confirmation checks for new duplicates again and saves all new tasks together. Previews expire after 15 minutes or a bot restart; submitting a new list replaces your preceding preview.
+
 ### Core Flow
 
 - `!task` - Show the board once
 - `!task setup` - Create a live-updating board in the current channel (Manage Guild only)
 - `!task add [issue]` - Add an issue to the board
+- `!task import` - Open import instructions, or preview an attached text file / pasted list
 - `!task add Fix avionics @user by 2026-06-01` - Add and assign an issue with a due date
 - `!task move [key] [todo|doing|review|done]` - Move an issue between columns
 - `!task claim [key]` - Assign an issue to yourself
@@ -160,7 +199,7 @@ npm run check
 npm test
 ```
 
-Tests cover self-assignment, competing claims, permissions, server isolation, team setup and filtering, tags surviving assignment, component limits, pagination, native modal submissions, storage failures, and deployment recovery. They use temporary data and fake PM2 processes.
+Tests cover self-assignment, competing claims, permissions, server isolation, team setup and filtering, tags surviving assignment, component limits, pagination, native modal submissions and file uploads, bulk import parsing and confirmation, duplicate handling, storage failures, and deployment recovery. They use temporary data and fake PM2 processes.
 
 ## Contributing
 

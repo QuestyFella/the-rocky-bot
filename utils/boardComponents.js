@@ -1,6 +1,6 @@
 const {
     ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
-    ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, escapeMarkdown
+    ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, FileUploadBuilder, escapeMarkdown
 } = require('discord.js');
 const { columns, priorities, getTaskStatus, getTaskPriority, getIssueKey, claimError, releaseError, userCanManageIssue } = require('./kanban');
 const { getConfiguredTeams, getTaskTeam, listTaskTeams, maxTeams, maxTeamNameLength } = require('./teams');
@@ -18,7 +18,8 @@ function buildBoardComponents() {
         button('kanban:refresh', 'Refresh')
     ), new ActionRowBuilder().addComponents(
         button('kanban:list:teams:0', 'Team Tasks'),
-        button('kanban:teamsetup', 'Setup Teams')
+        button('kanban:teamsetup', 'Setup Teams'),
+        button('kanban:import', 'Import Tasks')
     )];
 }
 
@@ -166,4 +167,14 @@ function buildTeamSetupModal(actor) {
         .addLabelComponents(new LabelBuilder().setLabel('Team names (one per line)').setTextInputComponent(input));
 }
 
-module.exports = { buildBoardComponents, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildTeamSetup, buildTeamSetupModal, filterTasks, pageSize };
+function buildImportModal() {
+    return new ModalBuilder().setCustomId('kanban:importpreview').setTitle('Import a task list').addLabelComponents(
+        new LabelBuilder().setLabel('Paste a short list').setDescription('Use Title, Description, Priority, Due date, and Team fields.')
+            .setTextInputComponent(new TextInputBuilder().setCustomId('list').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(4000)
+                .setPlaceholder('Title: Build payload\nDescription:\nPriority: high\nDue date: 2026-10-20\nTeam: Cubesat')),
+        new LabelBuilder().setLabel('Or upload the full list').setDescription('A UTF-8 .txt or .md file, up to 256 KiB and 250 tasks. You will review a preview first.')
+            .setFileUploadComponent(new FileUploadBuilder().setCustomId('file').setRequired(false).setMinValues(0).setMaxValues(1))
+    );
+}
+
+module.exports = { buildBoardComponents, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks, pageSize };

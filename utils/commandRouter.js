@@ -40,7 +40,7 @@ const kanbanSubcommands = new Set([
 ]);
 
 function isPrefixCommand(content, prefix) {
-    return content === prefix || content.startsWith(`${prefix} `);
+    return content === prefix || (content.startsWith(prefix) && /\s/.test(content[prefix.length] || ''));
 }
 
 function splitArgs(content) {

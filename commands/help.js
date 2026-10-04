@@ -15,6 +15,7 @@ module.exports = {
                         '`!task` - Show the board.',
                         '`!task setup` - Create the live-updating board in this channel.',
                         '`!task add [issue]` - Add an issue.',
+                        '**Import Tasks** / `!task import` - Paste a list or upload a .txt file; preview before saving.',
                         '`!task available` / `!task mine` - Browse available tasks or your work.',
                         '`!task teams` - Choose a team and browse its active tasks.',
                         '`!task move [key] [todo|doing|review|done]` - Move an issue.',
