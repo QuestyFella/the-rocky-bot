@@ -5,7 +5,7 @@ const {
 const { columns, priorities, getTaskStatus, getTaskPriority, getIssueKey, claimError, releaseError, userCanManageIssue, isManager } = require('./kanban');
 const { getConfiguredTeams, getTaskTeam, listTaskTeams, maxTeams, maxTeamNameLength } = require('./teams');
 const { getTaskTag } = require('./taskTags');
-const { isBlocked, canViewTask, blockingSummary, dependencyInput } = require('./taskDependencies');
+const { isWaiting, isHardBlocked, blockingSummary, dependencyInput } = require('./taskDependencies');
 
 const pageSize = 10;
 const teamPageSize = 25;
@@ -22,7 +22,7 @@ function buildBoardComponents(tagId = null) {
     )];
     return [new ActionRowBuilder().addComponents(
         button('kanban:add', 'Add Task', ButtonStyle.Primary),
-        button('kanban:list:available:0', 'Available Tasks', ButtonStyle.Success),
+        button('kanban:list:ready:0', 'Ready Tasks', ButtonStyle.Success),
         button('kanban:list:mine:0', 'My Tasks'),
         button('kanban:list:teams:0', 'Team Tasks'),
         button('kanban:more', 'More')
@@ -32,33 +32,36 @@ function buildBoardComponents(tagId = null) {
 function buildMoreMenu(actor, content = '') {
     const controls = [button('kanban:list:all:0', 'Browse Tasks')];
     if (isManager(actor)) controls.push(button('kanban:import', 'Import Tasks'), button('kanban:teamsetup', 'Setup Teams'), button('kanban:refresh', 'Refresh Board'));
+    else controls.push(button('kanban:list:available:0', 'Available Tasks'), button('kanban:list:waiting:0', 'Waiting Tasks'));
     controls.push(button('kanban:add', 'Add Task', ButtonStyle.Primary));
     return {
-        content: `${content ? `${content}\n\n` : ''}**More task controls**\nBrowse ${isManager(actor) ? 'all' : 'unlocked'} tasks, including completed work.${isManager(actor) ? '\nManager controls: view blocked tasks, import a task list, set up team labels, refresh the live board, or delete tasks by tag.' : ''}`,
-        embeds: [], components: [new ActionRowBuilder().addComponents(controls), ...(isManager(actor) ? [new ActionRowBuilder().addComponents(button('kanban:list:blocked:0', 'Blocked Tasks'), button('kanban:deletetags:0', 'Delete Tag Tasks', ButtonStyle.Danger))] : [])], allowedMentions: { parse: [] }
+        content: `${content ? `${content}\n\n` : ''}**More task controls**\nWaiting tasks remain visible and claimable. Browse Tasks includes completed work.${isManager(actor) ? '\nManager controls: import a task list, set up team labels, refresh the live board, or delete tasks by tag.' : ''}`,
+        embeds: [], components: [new ActionRowBuilder().addComponents(controls), ...(isManager(actor) ? [new ActionRowBuilder().addComponents(button('kanban:list:available:0', 'Available Tasks'), button('kanban:list:waiting:0', 'Waiting Tasks'), button('kanban:deletetags:0', 'Delete Tag Tasks', ButtonStyle.Danger))] : [])], allowedMentions: { parse: [] }
     };
 }
 
 function filterTasks(tasks, filter, actor, teamId = null) {
     return tasks.filter(task => {
-        if (!canViewTask(task, tasks, actor)) return false;
-        if (filter === 'blocked') return Boolean(actor?.member && isManager(actor)) && isBlocked(task, tasks);
+        if (filter === 'waiting' || filter === 'blocked') return isWaiting(task, tasks);
+        if (filter === 'ready') return getTaskStatus(task) !== 'done';
+        if (filter === 'readyonly') return getTaskStatus(task) !== 'done' && !isWaiting(task, tasks);
         if (filter === 'mine') return task.userId === actor.author.id && getTaskStatus(task) !== 'done';
         if (filter === 'available') return !task.userId && !claimError(actor, task, tasks);
         if (filter === 'teams') return getTaskStatus(task) !== 'done' && Boolean(getTaskTeam(task, actor)) && (!teamId || getTaskTeam(task, actor).id === teamId);
-        if (filter === 'tag') return !isBlocked(task, tasks) && getTaskTag(task).id === teamId;
+        if (filter === 'tag') return getTaskTag(task).id === teamId;
         return true;
     });
 }
 
 function buildTaskPicker(tasks, filter, requestedPage = 0, actor = null, teamId = null) {
     const allTasks = actor?.client?.taskStorage?.getAllTasks(actor.guild.id) || tasks;
+    if (filter === 'ready') tasks = [...tasks.filter(task => !isWaiting(task, allTasks)), ...tasks.filter(task => isWaiting(task, allTasks))];
     const pageCount = Math.max(1, Math.ceil(tasks.length / pageSize));
     const page = Math.max(0, Math.min(Number(requestedPage) || 0, pageCount - 1));
     const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
     const team = listTaskTeams(tasks, actor).find(team => team.id === teamId);
     const tag = tasks.length ? getTaskTag(tasks[0]) : null;
-    const labels = { available: 'Available Tasks', mine: 'My Tasks', all: 'All Tasks', blocked: 'Blocked Tasks', teams: team ? `Team Tasks: ${escapeMarkdown(team.name)}` : 'Team Tasks', tag: tag ? `Tasks: ${escapeMarkdown(tag.name)}` : 'Tag Tasks' };
+    const labels = { ready: 'Ready Tasks', readyonly: 'Ready Only', waiting: 'Waiting Tasks', blocked: 'Waiting Tasks', available: 'Available Tasks', mine: 'My Tasks', all: 'All Tasks', teams: team ? `Team Tasks: ${escapeMarkdown(team.name)}` : 'Team Tasks', tag: tag ? `Tasks: ${escapeMarkdown(tag.name)}` : 'Tag Tasks' };
     const components = [];
     if (visible.length) {
         const select = new StringSelectMenuBuilder()
@@ -67,7 +70,7 @@ function buildTaskPicker(tasks, filter, requestedPage = 0, actor = null, teamId 
             .addOptions(visible.map(task => ({
                 label: short(`${getIssueKey(task) || task.id}: ${task.title}`, 100),
                 value: String(task.id),
-                description: short(`${isBlocked(task, allTasks) ? 'Blocked · ' : ''}${getTaskTeam(task, actor) ? `${getTaskTeam(task, actor).name} · ` : ''}${columns.find(c => c.id === getTaskStatus(task)).name} · ${priorities[getTaskPriority(task)].label} priority · ${task.userId ? 'Assigned' : 'Available'}`, 100)
+                description: short(`${isWaiting(task, allTasks) ? 'Waiting · ' : 'Ready · '}${getTaskTeam(task, actor) ? `${getTaskTeam(task, actor).name} · ` : ''}${columns.find(c => c.id === getTaskStatus(task)).name} · ${priorities[getTaskPriority(task)].label} priority · ${task.userId ? 'Assigned' : 'Claimable'}`, 100)
             })));
         components.push(new ActionRowBuilder().addComponents(select));
     }
@@ -84,18 +87,23 @@ function buildTaskPicker(tasks, filter, requestedPage = 0, actor = null, teamId 
         button('kanban:list:all:0', 'Browse Tasks'),
         button('kanban:add', 'Add Task', ButtonStyle.Primary)
     ));
-    components.push(new ActionRowBuilder().addComponents(button('kanban:more', 'More')));
+    components.push(new ActionRowBuilder().addComponents(button('kanban:more', 'More'), button(filter === 'readyonly' ? 'kanban:list:ready:0' : 'kanban:list:readyonly:0', filter === 'readyonly' ? 'Include Waiting' : 'Ready Only')));
     const embeds = [];
     if (visible.length) {
-        const embed = new EmbedBuilder().setColor(0x0052cc);
-        for (const task of visible) embed.addFields({
-            name: `${short(getIssueKey(task) || task.id, 40)}: ${short(task.title, 200)}`,
-            value: `**Team:** ${escapeMarkdown(getTaskTeam(task, actor)?.name || 'No team')} · **Priority:** ${priorities[getTaskPriority(task)].label}\n**Status:** ${columns.find(column => column.id === getTaskStatus(task)).name} · **Due:** ${task.dueDate || 'None'}${isBlocked(task, allTasks) ? `\n🔒 **Blocked by:** ${blockingSummary(task, allTasks, 500)}` : ''}`
-        });
-        embeds.push(embed);
+        const partitions = filter === 'ready' ? [visible.filter(task => !isWaiting(task, allTasks)), visible.filter(task => isWaiting(task, allTasks))] : [visible];
+        for (const [index, group] of partitions.entries()) {
+            if (!group.length) continue;
+            const embed = new EmbedBuilder().setColor(filter === 'ready' && index === 1 ? 0x747f8d : 0x0052cc);
+            if (filter === 'ready') embed.setTitle(index === 1 ? '⏳ Waiting · still claimable' : '✅ Ready to work');
+            for (const task of group) embed.addFields({
+                name: `${short(getIssueKey(task) || task.id, 40)}: ${short(task.title, 200)}`,
+                value: short(`**Team:** ${short(escapeMarkdown(getTaskTeam(task, actor)?.name || 'No team'), 100)} · **Priority:** ${priorities[getTaskPriority(task)].label}\n**Status:** ${columns.find(column => column.id === getTaskStatus(task)).name} · **Due:** ${short(task.dueDate || 'None', 30)}${isWaiting(task, allTasks) ? `\n⏳ **Waiting on:** ${blockingSummary(task, allTasks, 100)}${isHardBlocked(task, allTasks) ? '\n🔒 Hard gate: Start Work and completion wait.' : ''}` : ''}`, 330)
+            });
+            embeds.push(embed);
+        }
     }
     return {
-        content: `**${labels[filter] || labels.all}** — ${tasks.length} task(s)${pageCount > 1 ? ` · Page ${page + 1}/${pageCount}` : ''}\n${visible.length ? 'Full task titles are listed below. Choose a task to read its description or update it.' : filter === 'teams' ? 'No active tasks for this team.' : 'No tasks here yet.'}`,
+        content: `**${labels[filter] || labels.all}** — ${tasks.length} task(s)${pageCount > 1 ? ` · Page ${page + 1}/${pageCount}` : ''}${filter === 'ready' ? ` · ${tasks.filter(task => !isWaiting(task, allTasks)).length} ready · ${tasks.filter(task => isWaiting(task, allTasks)).length} waiting` : ''}\n${visible.length ? `Full task titles are listed below. Choose a task to read its description or update it.${filter === 'ready' ? ' Ready tasks come first; grey waiting cards can still be claimed.' : ''}` : filter === 'teams' ? 'No active tasks for this team.' : 'No tasks here yet.'}`,
         embeds, components, allowedMentions: { parse: [] }
     };
 }
@@ -128,12 +136,11 @@ function buildTeamPicker(tasks, actor, requestedPage = 0) {
 function buildIssueComponents(task, actor) {
     const id = String(task.id);
     const tasks = actor.client?.taskStorage?.getAllTasks(actor.guild.id) || [task];
-    const blocked = isBlocked(task, tasks);
-    if (!canViewTask(task, tasks, actor)) return [new ActionRowBuilder().addComponents(button('kanban:list:available:0', 'Available Tasks'))];
+    const blocked = isHardBlocked(task, tasks);
     const controls = [];
     if (!claimError(actor, task)) {
         if (!task.userId) controls.push(button(`kanban:claim:${id}`, 'Claim', ButtonStyle.Success));
-        if (getTaskStatus(task) !== 'progress') controls.push(button(`kanban:start:${id}`, 'Start Work', ButtonStyle.Primary));
+        if (getTaskStatus(task) !== 'progress') controls.push(button(`kanban:start:${id}`, 'Start Work', ButtonStyle.Primary).setDisabled(blocked));
     }
     if (task.userId && !releaseError(actor, task)) controls.push(button(`kanban:release:${id}`, 'Release'));
     if (userCanManageIssue(actor, task)) controls.push(button(`kanban:edit:${id}`, 'Edit Task', ButtonStyle.Primary), button(`kanban:delete:${id}`, 'Delete Task', ButtonStyle.Danger));
@@ -143,7 +150,7 @@ function buildIssueComponents(task, actor) {
     if (userCanManageIssue(actor, task)) {
         components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
             .setCustomId(`kanban:status:${id}`)
-            .setPlaceholder(blocked ? 'Blocked task: return to To Do' : 'Change task status')
+            .setPlaceholder(blocked ? 'Hard gate: prerequisites unfinished' : 'Change task status')
             .addOptions(columns.filter(column => !blocked || column.id === 'todo').map(column => ({ label: column.name, value: column.id, emoji: column.icon, default: column.id === getTaskStatus(task) })))));
         const teams = getConfiguredTeams(actor);
         if (teams.length || getTaskTeam(task, actor)) {
@@ -186,14 +193,14 @@ function buildEditModal(task, draftId, tasks = []) {
         ['description', 'Description', TextInputStyle.Paragraph, false, task.description || '', 2000],
         ['priority', 'Priority (low, medium, high, urgent)', TextInputStyle.Short, false, getTaskPriority(task), 20],
         ['due', 'Due date (YYYY-MM-DD; blank clears)', TextInputStyle.Short, false, task.dueDate || '', 10],
-        ['dependencies', 'Blocked by (task keys or [TAG]; blank clears)', TextInputStyle.Short, false, dependencyInput(task, tasks), 2000]
+        ['dependencies', 'Waiting on (prefix ! for a hard gate)', TextInputStyle.Short, false, dependencyInput(task, tasks), 2000]
     ];
     return new ModalBuilder().setCustomId(`kanban:editsave:${draftId}`).setTitle('Edit task details')
         .addLabelComponents(fields.map(([id, label, style, required, value, maxLength]) => {
             const input = new TextInputBuilder().setCustomId(id).setStyle(style).setRequired(required).setMaxLength(Math.max(maxLength, value.length));
             if (value) input.setValue(value);
             const field = new LabelBuilder().setLabel(label).setTextInputComponent(input);
-            if (id === 'dependencies') { input.setPlaceholder('URC-12, [POWER], [GROUND STATION]'); field.setDescription('Wait for each task and every task in each tag. Blocked tasks are visible only to managers.'); }
+            if (id === 'dependencies') { input.setPlaceholder('URC-12, [POWER], !URC-3'); field.setDescription('Soft links are reminders. Managers use ! to gate Start Work and completion. Claims stay allowed.'); }
             return field;
         }));
 }

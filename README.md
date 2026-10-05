@@ -5,8 +5,8 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 ## Features
 
 - Live-updating Kanban board using embeds
-- Every unlocked task appears on the board, grouped by title tags with an overview and linked messages
-- Prerequisite tasks unlock dependent work automatically; managers can review blocked tasks privately
+- Every task appears on the board, grouped by title tags with an overview and linked messages
+- Soft prerequisites show readiness; a few manager-controlled hard gates hold Start Work and completion
 - Buttons, task pickers, and Add Task / Edit Task forms
 - Import a pasted list or text file, review a preview, then save the whole batch
 - Claim, Start Work, Release, and status changes without typing commands
@@ -30,21 +30,21 @@ A Discord bot for running a lightweight project Kanban board directly in Discord
 Run `!task` (or ask a server manager to run `!task setup` once for a live board).
 
 1. Anyone can click **Add Task** to enter a title, description, priority, optional due date, and team. New tasks are unassigned.
-2. Click **Available Tasks**, choose a task, and click **Claim** to assign yourself. **Start Work** also moves it to In Progress.
+2. Click **Ready Tasks**, choose a task, and click **Claim** to assign yourself. **Start Work** also moves it to In Progress.
 3. Click **My Tasks** to see your active work. Choose a task and use its status dropdown to move it to Review or Done.
 4. Click **Release** to return your task to To Do for someone else to claim.
 5. Click **Team Tasks**, choose a group, and see its active tasks, including tasks claimed by teammates.
-6. Click **Edit Task** in a task's details to change its title, description, priority, due date, or prerequisites. The form is prefilled; leaving description, due date, or prerequisites blank clears it. The creator, assignee, and server managers can edit unlocked tasks, as can members of an explicitly assigned role.
+6. Click **Edit Task** in a task's details to change its title, description, priority, due date, or prerequisites. The form is prefilled; leaving description, due date, or prerequisites blank clears it. The creator, assignee, and server managers can edit tasks, as can members of an explicitly assigned role.
 
-The shared board shows Add Task, Available Tasks, My Tasks, Team Tasks, and More. **More** opens a private menu: everyone sees Browse Tasks and Add Task; members with **Administrator** or **Manage Server** permission also see Import Tasks, Setup Teams, Refresh Board, Blocked Tasks, and Delete Tag Tasks. Task controls appear only when you can use them. Permissions are checked again when you click or save, including on older messages.
+The shared board shows Add Task, Ready Tasks, My Tasks, Team Tasks, and More. **More** opens a private menu: everyone sees Browse Tasks, Available Tasks, Waiting Tasks, and Add Task; members with **Administrator** or **Manage Server** permission also see Import Tasks, Setup Teams, Refresh Board, and Delete Tag Tasks. Task controls appear only when you can use them. Permissions are checked again when you click or save, including on older messages.
 
 ### Deleting tasks
 
-Open a task and click **Delete Task**, review the private preview, then confirm or cancel. This follows the same permissions as Edit Task. Blocked tasks remain accessible only to server managers.
+Open a task and click **Delete Task**, review the private preview, then confirm or cancel. This follows the same permissions as Edit Task. Waiting tasks follow the same permissions as other tasks.
 
-For bulk deletion, a server manager opens **More → Delete Tag Tasks**, chooses a `[TAG]` from task titles, then reviews and confirms the exact tasks to remove. This includes all teams and statuses, including completed and blocked tasks. **General** covers untagged tasks and tasks with a `[GENERAL]` prefix. Both the tag picker and preview have Previous/Next buttons for long lists.
+For bulk deletion, a server manager opens **More → Delete Tag Tasks**, chooses a `[TAG]` from task titles, then reviews and confirms the exact tasks to remove. This includes all teams and statuses, including completed and waiting tasks. **General** covers untagged tasks and tasks with a `[GENERAL]` prefix. Both the tag picker and preview have Previous/Next buttons for long lists.
 
-Deletion is permanent. Previews expire after 15 minutes or a bot restart. If a selected task is edited, claimed, moved, or completed, or the tag gains or loses tasks, open a new preview before deleting. Permissions are checked again at confirmation. Bulk deletion saves the whole batch together and refreshes the live board automatically. Other tasks retain their prerequisites: a deleted direct prerequisite or an empty prerequisite tag keeps unfinished work blocked until a manager updates its prerequisites. The existing `!task delete KEY` text command still deletes a single task immediately.
+Deletion is permanent. Previews expire after 15 minutes or a bot restart. If a selected task is edited, claimed, moved, or completed, or the tag gains or loses tasks, open a new preview before deleting. Permissions are checked again at confirmation. Bulk deletion saves the whole batch together and refreshes the live board automatically. Other tasks retain their prerequisites: a deleted direct prerequisite or an empty prerequisite tag shows Waiting; hard gates still hold Start Work and completion until a manager updates them. The existing `!task delete KEY` text command still deletes a single task immediately.
 
 ### Board layout
 
@@ -52,23 +52,23 @@ The live board groups tasks by the **[TAG]** at the start of their title, such a
 
 With multiple tags, a short overview shows task counts, progress, and **View tasks** links to each group. Each group has its own message with the tag and team at the top, followed by task cards showing the full title, status, priority, due date, and owner. If a group contains different teams, each task shows its own team. **Open Tasks** opens a private task picker for that tag, including completed tasks. Add or change a `[TAG]` prefix through **Add Task** or **Edit Task** to move a task into a group.
 
-Large groups continue across linked messages so every unlocked task remains visible. Previous/Next group links and an Overview link connect them. Task changes update the affected messages; adding a group keeps existing group links, and a deleted message is recreated automatically. **Refresh Board** forces every message to refresh.
+Large groups continue across linked messages so every task remains visible. Previous/Next group links and an Overview link connect them. Task changes update the affected messages; adding a group keeps existing group links, and a deleted message is recreated automatically. **Refresh Board** forces every message to refresh.
 
 Task pickers and task controls opened from the board are visible only to the person who clicked. Task pages show 10 entries with full titles, team, priority, status, and due date above the dropdown. Choose a task to read its full description and use its controls. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim. Edit forms expire after 15 minutes or a restart, and detect changes to task details made while the form was open. Assignment, status, and team changes made during an edit are preserved.
 
-### Blocking tasks with prerequisites
+### Readiness and prerequisites
 
 1. Open a task and click **Edit Task**.
-2. In **Blocked by**, enter task keys or whole tags separated by commas, such as `URC-12, [POWER], [GROUND STATION]`. These tasks and tags can belong to any team in the same server. You can enter up to 20 prerequisites; each tag counts as one.
-3. Save. An unfinished task stays blocked until **every** prerequisite is **Done**. It then appears on the board and becomes available to claim automatically. Leave the field blank to remove its prerequisites.
+2. In **Waiting on**, enter task keys or whole tags separated by commas, such as `URC-12, [POWER]`. You can enter up to 20 references; each tag counts as one.
+3. Save. The task shows **Waiting on** until those prerequisites are Done. It stays visible, editable, and claimable. Soft links also allow Start Work, Review, and Done.
 
-A tag prerequisite requires **every current task in that tag** to be Done, including blocked tasks. Tag names ignore case and extra spaces. The private blocked-task view shows tag progress, such as **3/5 Done**. Tags stay linked to their current tasks: adding a task, moving an unfinished task into the tag, or reopening a task blocks unfinished dependent work again. Moving a task out of the tag removes it from that prerequisite. An empty or missing tag keeps work blocked until tasks are added to it or a manager removes the prerequisite.
+**Ready Tasks** lists active work with ready tasks first and grey cards for waiting tasks. Waiting options remain enabled. **Ready Only** filters out waiting work; **Include Waiting** brings it back. **Available Tasks** shows unassigned claimable tasks, including waiting work. **Waiting Tasks** shows the unfinished tasks that have unmet prerequisites. These views are available to all members. Discord does not support custom text colours in dropdown options, so waiting cards use a grey embed colour and a Waiting label.
 
-The shared board hides blocked tasks for everyone. Members also cannot see them in Browse Tasks, My Tasks, Team Tasks, or through old task controls. Members with **Administrator** or **Manage Server** permission can open **More → Blocked Tasks** to review and edit them privately. Managers' private Browse Tasks and Team Tasks views also include blocked work, labeled with what it is waiting on. A member who adds unfinished prerequisites to their task will need a server manager to edit it again until it unlocks.
+Keep hard gates for a few meaningful milestones. Server managers can prefix a reference with **!**, such as `!URC-12, ![POWER], URC-3`. The first two hold Start Work, Review, and Done; the last is a soft reminder. Claims stay allowed. Members can edit soft links while preserving existing hard gates; only managers can add, change, or remove hard gates. Text commands enforce the same rules: `!task depends KEY OTHER-1, !OTHER-2, [POWER]`. Use `none` to clear references when permitted.
 
-Blocked tasks cannot be claimed, started, or moved to Review or Done, including through text commands. Reopening a prerequisite blocks its unfinished dependent tasks again; completed work keeps its history. Deleting a prerequisite leaves dependent tasks blocked until a manager removes that reference. Self references, a task's own tag, unknown tasks or tags, and circular dependencies are rejected. Title edits also check for cycles when moving tasks between tags.
+A tag reference follows **every current task in that tag**, including tasks added later. Names ignore case and extra spaces. Finishing, reopening, adding, deleting, or moving a task updates readiness automatically. An empty or missing tag shows Waiting. Missing hard prerequisites continue to gate work. Completed tasks keep their history. Self references, a task's own tag, unknown references, and circular dependencies are rejected. Title edits check for cycles when moving tasks between tags.
 
-The text command `!task depends URC-20 URC-12, [POWER]` sets prerequisites; `!task depends URC-20 none` clears them. To wait for a whole category, use `!task depends URC-20 [STM32]`. Blocked task details stay in the private button workflow. Existing tasks start with no prerequisites; configure the relationships you want through Edit Task.
+For a numbered JSON dependency plan, `scripts/apply-dependency-plan.js --guild ID --plan FILE --team NAME` previews exact title matches and maps plan numbers to stable task IDs. Rows use `id`, `title`, `blocked_by` (soft links), and optional `hard_by`. Add `--apply` to save one atomic batch with a backup. Run it with the bot and deployment watcher stopped, then restart them so their task caches reload. Unknown or ambiguous titles and invalid graphs abort the whole plan. Plan files and backups stay on the server, outside the source repository.
 
 ### Setting up teams
 
@@ -141,7 +141,8 @@ An import supports up to 250 tasks in a 256 KiB file; pasted form text supports 
 - `!task team [key] Team Name|none` - Set or clear the team label (names can contain spaces)
 - `!task priority [key] [low|medium|high|urgent]` - Set issue priority
 - `!task due [key] [date|none]` - Set or clear a due date
-- `!task depends [key] OTHER-1, [TAG]|none` - Set or clear prerequisite tasks and whole tags
+- `!task depends [key] OTHER-1, !OTHER-2, [TAG]|none` - Set soft links and manager-only hard gates
+- `!task ready` / `!task readyonly` / `!task waiting` - Browse readiness
 - `!task edit [key] [new title]` - Rename an issue
 - `!task delete [key]` - Delete an issue
 

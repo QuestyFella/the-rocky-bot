@@ -3,7 +3,7 @@ const { columns, priorities, getTaskStatus, getTaskPriority, getIssueKey, sortBo
 const { getTaskTeam } = require('./teams');
 const { getTaskTag, groupTasksByTag } = require('./taskTags');
 const { buildBoardComponents } = require('./boardComponents');
-const { isBlocked } = require('./taskDependencies');
+const { isWaiting, isHardBlocked, blockingSummary } = require('./taskDependencies');
 
 const blue = 0x0052cc;
 const dueFormat = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
@@ -23,7 +23,7 @@ function statusCounts(tasks) {
     return columns.map(column => ({ ...column, count: tasks.filter(task => getTaskStatus(task) === column.id).length }));
 }
 
-function taskFields(task, displayIndex, actor, showTeam) {
+function taskFields(task, displayIndex, actor, showTeam, tasks) {
     const tag = getTaskTag(task);
     const key = `\`${String(getIssueKey(task) || `#${displayIndex + 1}`).replace(/`/g, '').slice(0, 100)}\``;
     const title = escapeMarkdown(tag.title);
@@ -33,7 +33,8 @@ function taskFields(task, displayIndex, actor, showTeam) {
     const due = date && !Number.isNaN(date.getTime()) ? dueFormat.format(date) : task.dueDate || 'No due date';
     const owner = task.userId ? `<@${task.userId}>` : task.assignedToRole ? `<@&${task.assignedToRole}>` : getTaskStatus(task) === 'done' ? 'Unassigned' : 'Available to claim';
     const team = getTaskTeam(task, actor)?.name || 'No team';
-    const details = `${status.icon} **${status.name}** · ${priority.icon} ${priority.label} · 📅 ${escapeMarkdown(due)}\n👤 ${owner}${showTeam ? ` · Team: ${escapeMarkdown(team)}` : ''}`;
+    const waiting = isWaiting(task, tasks);
+    const details = `${status.icon} **${status.name}** · ${priority.icon} ${priority.label} · 📅 ${escapeMarkdown(due)}\n👤 ${owner}${showTeam ? ` · Team: ${escapeMarkdown(team)}` : ''}${waiting ? `\n⏳ **Waiting on:** ${blockingSummary(task, tasks, 500)}${isHardBlocked(task, tasks) ? '\n🔒 Hard gate: claim now; Start Work and completion wait.' : ''}` : ''}`;
     const name = `${key} · ${title}`;
     const values = splitText(name.length <= 256 ? details : `**${title}**\n${details}`);
     return values.map((value, index) => ({ name: index ? 'Task continued' : name.length <= 256 ? name : key, value, inline: false }));
@@ -52,13 +53,15 @@ function packFields(fields, overhead, maxFields, extraPerField = 0) {
 }
 
 function renderBoard(tasks, title, actor) {
-    const visibleTasks = tasks.filter(task => !isBlocked(task, tasks));
+    const visibleTasks = tasks;
     const groups = groupTasksByTag(visibleTasks);
     const displayTasks = sortBoardTasks(tasks);
     const indexes = new Map(displayTasks.map((task, index) => [task.id, index]));
     const result = [];
     if (groups.length > 1) {
-        const description = `**${visibleTasks.length} tasks · ${groups.length} tags**\n${statusCounts(visibleTasks).map(column => `${column.icon} ${column.name}: **${column.count}**`).join(' · ')}\n\nJump to a tag below. Use **Available Tasks** to claim work or **My Tasks** to find your assignments.`;
+        const active = tasks.filter(task => getTaskStatus(task) !== 'done');
+        const waiting = active.filter(task => isWaiting(task, tasks)).length;
+        const description = `**${visibleTasks.length} tasks · ${groups.length} tags**\n${statusCounts(visibleTasks).map(column => `${column.icon} ${column.name}: **${column.count}**`).join(' · ')}\n✅ **${active.length - waiting} ready** · ⏳ **${waiting} waiting**\n\nJump to a tag below. Use **Ready Tasks** to find work or **My Tasks** for your assignments. Waiting tasks remain visible and claimable.`;
         const fields = groups.map(group => ({ name: escapeMarkdown(group.name), value: `${group.tasks.length} tasks · ${group.tasks.filter(task => getTaskStatus(task) === 'done').length} done`, inline: true }));
         const pages = packFields(fields, title.length + description.length + 200, 25, 160);
         let offset = 0;
@@ -74,7 +77,7 @@ function renderBoard(tasks, title, actor) {
     }
     if (!groups.length) return [{
         sectionKey: 'empty', content: '', embeds: [new EmbedBuilder().setColor(blue).setTitle(title.slice(0, 220))
-            .setDescription(tasks.length ? 'No unlocked tasks to show. More work will appear when its prerequisites are Done. Server managers can open **More → Blocked Tasks** to review what is waiting.' : 'No tasks yet. Click **Add Task** to get started. Use a title like **[POWER] Check the battery pack** to group related work.')
+            .setDescription('No tasks yet. Click **Add Task** to get started. Use a title like **[POWER] Check the battery pack** to group related work.')
             .setFooter({ text: 'Everyone can add a task. Team labels are optional.' })],
         components: buildBoardComponents(), allowedMentions: { parse: [] }
     }];
@@ -83,8 +86,9 @@ function renderBoard(tasks, title, actor) {
         const teams = [...new Set(group.tasks.map(task => getTaskTeam(task, actor)?.name || 'No team'))];
         const counts = statusCounts(group.tasks);
         const done = counts.find(column => column.id === 'done').count;
-        const description = `**${group.tasks.length} tasks · ${done}/${group.tasks.length} done**\n${teams.length === 1 ? `Team: **${escapeMarkdown(teams[0])}**` : 'Teams shown on each task.'}`;
-        const fields = ordered.flatMap(task => taskFields(task, indexes.get(task.id), actor, teams.length > 1));
+        const waiting = group.tasks.filter(task => isWaiting(task, tasks)).length;
+        const description = `**${group.tasks.length} tasks · ${done}/${group.tasks.length} done · ${waiting} waiting**\n${teams.length === 1 ? `Team: **${escapeMarkdown(teams[0])}**` : 'Teams shown on each task.'}`;
+        const fields = ordered.flatMap(task => taskFields(task, indexes.get(task.id), actor, teams.length > 1, tasks));
         const pages = packFields(fields, group.name.length + description.length + 200, 10);
         for (const [index, page] of pages.entries()) result.push({
             sectionKey: `tag:${group.id}:${index}`, tagId: group.id,

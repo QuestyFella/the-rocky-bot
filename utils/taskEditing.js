@@ -1,9 +1,10 @@
 const { randomUUID } = require('crypto');
-const { normalizePriority, getTaskPriority, userCanManageIssue } = require('./kanban');
-const { dependencyIds, dependencyTags, resolveDependencies, validateDependencyGraph, canViewTask } = require('./taskDependencies');
+const { normalizePriority, getTaskPriority, userCanManageIssue, isManager } = require('./kanban');
+const { dependencyIds, dependencyTags, hardDependencyIds, hardDependencyTags, resolveDependencies, validateDependencyGraph } = require('./taskDependencies');
 
 const editLifetimeMs = 15 * 60 * 1000;
-const editableDetails = task => [task.title || '', task.description || '', getTaskPriority(task), task.dueDate || '', JSON.stringify([dependencyIds(task).sort(), dependencyTags(task).sort()])];
+const gateDetails = task => JSON.stringify([hardDependencyIds(task).sort(), hardDependencyTags(task).sort()]);
+const editableDetails = task => [task.title || '', task.description || '', getTaskPriority(task), task.dueDate || '', JSON.stringify([dependencyIds(task).sort(), dependencyTags(task).sort()]), gateDetails(task)];
 
 function prepareEdit(actor, task) {
     const drafts = actor.client.taskEdits ||= new Map();
@@ -28,7 +29,6 @@ function saveEdit(actor, id, fields) {
     const tasks = actor.client.taskStorage.getAllTasks(actor.guild.id);
     const task = tasks.find(task => task.id === draft.taskId);
     if (!task) return { error: 'This task no longer exists. Open Browse Tasks to choose another.' };
-    if (!canViewTask(task, tasks, actor)) return { error: 'This task is blocked. Only server managers can edit it until its prerequisites are Done.' };
     if (!userCanManageIssue(actor, task)) return { error: 'You no longer have permission to edit this task.' };
     if (editableDetails(task).some((value, i) => value !== draft.details[i])) {
         actor.client.taskEdits.delete(id);
@@ -52,6 +52,9 @@ function saveEdit(actor, id, fields) {
         if (dependencies.error) return { task, error: dependencies.error };
         edited.dependsOn = dependencies.ids;
         edited.dependsOnTags = dependencies.tags;
+        edited.hardDependsOn = dependencies.hardIds;
+        edited.hardDependsOnTags = dependencies.hardTags;
+        if (!isManager(actor) && gateDetails(edited) !== gateDetails(task)) return { task, error: 'Only server managers can add, change, or remove hard gates (the ! prerequisites). Keep them unchanged when editing soft links.' };
     }
     const cycle = validateDependencyGraph(edited, tasks);
     if (cycle) return { task, error: cycle };

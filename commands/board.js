@@ -9,7 +9,7 @@ const {
 } = require('../utils/kanban');
 const { getConfiguredTeams, getTaskTeam, validateTeam, setTaskTeam, preserveTaskTeam } = require('../utils/teams');
 const { renderBoard } = require('../utils/boardDisplay');
-const { canViewTask, isBlocked, blockingError, prerequisites, prerequisiteDone, prerequisiteLine, resolveDependencies, validateDependencyGraph } = require('../utils/taskDependencies');
+const { isWaiting, isHardBlocked, hardDependencyIds, hardDependencyTags, blockingError, prerequisites, prerequisiteDone, prerequisiteLine, resolveDependencies, validateDependencyGraph } = require('../utils/taskDependencies');
 
 const boardConfigFile = dataPath('kanbanBoards.json');
 const legacyBoardConfigFile = dataPath('jiraBoards.json');
@@ -189,7 +189,7 @@ function findTask(message, identifier) {
         }
     }
 
-    return { tasks, task: task && canViewTask(task, tasks, message) ? task : null };
+    return { tasks, task: task || null };
 }
 
 function userCanAssignTo(message, user, role) {
@@ -387,7 +387,8 @@ function buildIssueEmbed(task, displayIndex, actor = null) {
             chunks[chunks.length - 1] += `${chunks.at(-1) ? '\n' : ''}${line}`;
         }
         const complete = dependencies.every(prerequisiteDone);
-        embed.addFields(chunks.map((value, index) => ({ name: index ? 'Prerequisites continued' : isBlocked(task, tasks) ? '🔒 Blocked by' : complete ? 'Prerequisites complete' : 'Prerequisites', value })));
+        embed.addFields(chunks.map((value, index) => ({ name: index ? 'Prerequisites continued' : isWaiting(task, tasks) ? '⏳ Waiting on' : complete ? 'Prerequisites complete' : 'Prerequisites', value })));
+        if (isHardBlocked(task, tasks)) embed.addFields({ name: '🔒 Hard gate', value: 'You can claim this task now. Start Work, Review, and Done wait until its hard prerequisites are complete.' });
     }
 
     const data = embed.toJSON();
@@ -509,7 +510,7 @@ function sendUsage(message) {
             '`!task setup` - Create a live-updating board in this channel.\n' +
             '`!task` - Open the board and its buttons.\n' +
             '**More → Import Tasks** / `!task import` - Managers can paste a list or upload a .txt file, then confirm the preview.\n' +
-            'Click **Add Task** to create a task, **Available Tasks** to claim work, **My Tasks** for your tasks, or **Team Tasks** to choose a group. Open a task and click **Edit Task** to edit its details. Managers can enter team names through **More → Setup Teams**.\n' +
+            'Click **Add Task** to create a task, **Ready Tasks** to find work, **My Tasks** for your tasks, or **Team Tasks** to choose a group. Open a task and click **Edit Task** to edit its details. Managers can enter team names through **More → Setup Teams**.\n' +
             '`!task add Fix avionics @user by 2026-06-01` - Add an issue.\n' +
             '`!task move KEY doing` - Move an issue between columns.\n' +
             '`!task claim KEY` - Assign an issue to yourself.\n' +
@@ -519,7 +520,7 @@ function sendUsage(message) {
             '`!task assign KEY @user` - Assign an issue.\n' +
             '`!task priority KEY high` - Set priority.\n' +
             '`!task due KEY 2026-06-01` - Set or clear a due date.\n' +
-            '`!task depends KEY OTHER-1, [POWER]` - Wait for tasks or whole tags; use `none` to clear.\n' +
+            '`!task depends KEY OTHER-1, [POWER]` - Soft waiting links; prefix ! for a manager-only hard gate. Use `none` to clear.\n' +
             '`!task details KEY` - Show one issue.\n' +
             '`!task edit KEY New title` - Rename an issue.\n' +
             '`!task delete KEY` - Delete an issue.\n\n' +
@@ -555,7 +556,7 @@ module.exports = {
             return message.channel.send(buildTeamPicker(message.client.taskStorage.getAllTasks(message.guild.id), actor));
         }
 
-        if (['mine', 'available'].includes(subcommand)) {
+        if (['mine', 'available', 'ready', 'readyonly', 'waiting'].includes(subcommand)) {
             const filter = subcommand;
             const actor = { client: message.client, guild: message.guild, member: message.member, author: message.author, publicList: true };
             const tasks = sortBoardTasks(filterTasks(message.client.taskStorage.getAllTasks(message.guild.id), filter, actor));
@@ -565,15 +566,19 @@ module.exports = {
         if (['depends', 'blockedby'].includes(subcommand)) {
             if (args.length < 2) return message.reply('Usage: `!task depends KEY OTHER-1, [POWER]` or `!task depends KEY none`');
             const { tasks, task } = findTask(message, args[0]);
-            if (!task) return message.reply('I could not find that task. Blocked tasks are available to server managers through More → Blocked Tasks.');
+            if (!task) return message.reply('I could not find that task. Open Browse Tasks to choose a current task.');
             if (!userCanManageIssue(message, task)) return message.reply('You do not have permission to edit this task.');
             const dependencies = resolveDependencies(task, args.slice(1).join(' '), tasks);
             if (dependencies.error) return message.reply(dependencies.error);
+            const previousGates = JSON.stringify([hardDependencyIds(task).sort(), hardDependencyTags(task).sort()]);
+            if (!(message.member.permissions.has(PermissionFlagsBits.ManageGuild) || message.member.permissions.has(PermissionFlagsBits.Administrator)) && previousGates !== JSON.stringify([dependencies.hardIds.sort(), dependencies.hardTags.sort()])) return message.reply('Only server managers can add, change, or remove hard gates (the ! prerequisites).');
             task.dependsOn = dependencies.ids;
             task.dependsOnTags = dependencies.tags;
+            task.hardDependsOn = dependencies.hardIds;
+            task.hardDependsOnTags = dependencies.hardTags;
             task.updatedAt = new Date().toISOString();
             const success = message.client.taskStorage.updateTask(message.guild.id, task.id, task);
-            return message.reply(success ? `Prerequisites saved for ${getIssueKey(task) || task.id}. It will unlock when every prerequisite is Done.` : 'Failed to save prerequisites.');
+            return message.reply(success ? `Prerequisites saved for ${getIssueKey(task) || task.id}. Waiting tasks stay visible and claimable; only ! prerequisites gate Start Work and completion.` : 'Failed to save prerequisites.');
         }
 
         if (subcommand === 'team') {
@@ -708,7 +713,7 @@ module.exports = {
             if (!args[0]) return message.reply('Usage: `!task start KEY`');
             const { task } = findTask(message, args[0]);
             if (!task) return message.reply('I could not find that task.');
-            const error = claimError(message, task);
+            const error = claimError(message, task) || blockingError(task, message.client.taskStorage.getAllTasks(message.guild.id));
             if (error) return message.reply(error);
             preserveTaskTeam(task, message);
             task.userId = message.author.id;
@@ -832,8 +837,6 @@ module.exports = {
             if (!task) {
                 return message.reply('I could not find that issue. Use the issue key, task ID, or board number.');
             }
-
-            if (isBlocked(task, tasks)) return message.reply('This task is blocked. Open More → Blocked Tasks to view it privately.');
 
             const displayIndex = sortBoardTasks(tasks).findIndex(item => item.id === task.id);
             const embed = buildIssueEmbed(task, displayIndex, message);

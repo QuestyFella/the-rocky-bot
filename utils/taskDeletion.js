@@ -1,7 +1,7 @@
 const { randomUUID } = require('crypto');
 const { isManager, userCanManageIssue, sortBoardTasks } = require('./kanban');
 const { getTaskTag, groupTasksByTag } = require('./taskTags');
-const { canViewTask, dependencyIds, dependencyTags } = require('./taskDependencies');
+const { dependencyIds, dependencyTags } = require('./taskDependencies');
 
 const lifetimeMs = 15 * 60 * 1000;
 const snapshot = tasks => JSON.stringify(tasks.map(task => [String(task.id), JSON.stringify(task)]).sort(([a], [b]) => a.localeCompare(b)));
@@ -14,7 +14,6 @@ function deletionCandidates(actor, selection, tasks) {
     }
     const task = tasks.find(task => String(task.id) === selection.taskId);
     if (!task) return { error: 'This task no longer exists. Open Browse Tasks to choose another.' };
-    if (!canViewTask(task, tasks, actor)) return { error: 'This task is blocked. Only server managers can delete it until its prerequisites are Done.' };
     if (!userCanManageIssue(actor, task)) return { error: 'You do not have permission to delete this task.' };
     return { tasks: [task] };
 }

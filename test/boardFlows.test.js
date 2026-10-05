@@ -13,7 +13,7 @@ const { handleBoardInteraction } = require('../utils/boardInteractions');
 const { buildBoardComponents, buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, pageSize } = require('../utils/boardComponents');
 const { getTaskStatus } = require('../utils/kanban');
 const { getTaskTag } = require('../utils/taskTags');
-const { isBlocked } = require('../utils/taskDependencies');
+const { isWaiting } = require('../utils/taskDependencies');
 const { buildDeletionTagPicker, buildDeletionPreview } = require('../utils/deletionComponents');
 const { saveTeams, getConfiguredTeams } = require('../utils/teams');
 const { prepareImport } = require('../utils/taskImport');
@@ -125,13 +125,13 @@ async function submitEdit(f, modal, values = {}, options = {}) {
 
 test('shared board stays simple and More privately hides every manager control from members', async () => {
     const member = fixture();
-    assert.deepEqual(controls({ components: buildBoardComponents() }).map(c => c.label), ['Add Task', 'Available Tasks', 'My Tasks', 'Team Tasks', 'More']);
+    assert.deepEqual(controls({ components: buildBoardComponents() }).map(c => c.label), ['Add Task', 'Ready Tasks', 'My Tasks', 'Team Tasks', 'More']);
     const result = await interact(member, 'kanban:more', { privateMessage: false });
     assert.equal(result.responses[0][1].flags, MessageFlags.Ephemeral);
-    assert.deepEqual(controls(result.payload).map(c => c.label), ['Browse Tasks', 'Add Task']);
+    assert.deepEqual(controls(result.payload).map(c => c.label), ['Browse Tasks', 'Available Tasks', 'Waiting Tasks', 'Add Task']);
     const admin = fixture({ manager: true });
     const privateMenu = (await interact(admin, 'kanban:more', { privateMessage: false })).payload;
-    assert.deepEqual(controls(privateMenu).map(c => c.label), ['Browse Tasks', 'Import Tasks', 'Setup Teams', 'Refresh Board', 'Add Task', 'Blocked Tasks', 'Delete Tag Tasks']);
+    assert.deepEqual(controls(privateMenu).map(c => c.label), ['Browse Tasks', 'Import Tasks', 'Setup Teams', 'Refresh Board', 'Add Task', 'Available Tasks', 'Waiting Tasks', 'Delete Tag Tasks']);
     for (const payload of [buildTeamPicker([], admin.actor), buildTaskPicker([], 'all', 0, admin.actor), { components: buildBoardComponents() }]) {
         assert.ok(!ids(payload).some(id => /kanban:(teamsetup|import|refresh)/.test(id)));
     }
@@ -493,16 +493,16 @@ function addPrerequisites(f, count = 2) {
 test('admin sets multiple prerequisites in Edit Task and each must finish before a task unlocks', async () => {
     const f = fixture({ manager: true, task: { title: '[TEST] Final payload test' } });
     const prerequisites = addPrerequisites(f);
-    const result = await submitEdit(f, await openEdit(f), { dependencies: 'RC-2, rc-3' });
+    const result = await submitEdit(f, await openEdit(f), { dependencies: '!RC-2, !rc-3' });
     assert.match(result.payload.content, /saved/);
     assert.deepEqual(taskNow(f).dependsOn, prerequisites.map(task => task.id));
-    assert.ok(result.payload.embeds[0].toJSON().fields.some(field => field.name.includes('Blocked by') && field.value.includes('RC-2') && field.value.includes('RC-3')));
-    assert.ok(!ids(result.payload).includes('kanban:claim:stable-task'));
-    assert.ok(!ids(result.payload).includes('kanban:start:stable-task'));
+    assert.ok(result.payload.embeds[0].toJSON().fields.some(field => field.name.includes('Waiting on') && field.value.includes('RC-2') && field.value.includes('RC-3')));
+    assert.ok(ids(result.payload).includes('kanban:claim:stable-task'));
+    assert.equal(controls(result.payload).find(c => c.custom_id === 'kanban:start:stable-task').disabled, true);
     const statuses = controls(result.payload).find(control => control.custom_id === 'kanban:status:stable-task');
     assert.deepEqual(statuses.options.map(option => option.value), ['todo']);
     const reopened = await openEdit(f);
-    assert.equal(reopened.toJSON().components.find(label => label.component.custom_id === 'dependencies').component.value, 'RC-2, RC-3');
+    assert.equal(reopened.toJSON().components.find(label => label.component.custom_id === 'dependencies').component.value, '!RC-2, !RC-3');
     let blocked = await interact(f, 'kanban:list:blocked:0', { privateMessage: false });
     assert.equal(blocked.responses[0][1].flags, MessageFlags.Ephemeral);
     assert.deepEqual(controls(blocked.payload).find(c => c.custom_id === 'kanban:select').options.map(option => option.value), ['stable-task']);
@@ -520,55 +520,53 @@ test('admin sets multiple prerequisites in Edit Task and each must finish before
     assert.deepEqual(taskNow(f).dependsOn, prerequisites.map(task => task.id));
 });
 
-test('members never see blocked work in any list, details, edit form, or stale action', async () => {
-    const f = fixture({ task: { createdBy: 'alice', userId: 'alice', title: '[TEST] Hidden target' } });
-    const prerequisites = addPrerequisites(f, 1);
+test('members see soft waiting work in every list and can claim, start, edit, and complete it', async () => {
+    const f = fixture({ task: { createdBy: 'alice', title: '[TEST] Waiting target' } });
+    const [prerequisite] = addPrerequisites(f, 1);
     const team = getConfiguredTeams(f.actor)[0];
-    f.client.taskStorage.updateTask(f.guild.id, f.initial.id, { ...taskNow(f), teamId: team.id, teamName: team.name, dependsOn: [prerequisites[0].id] });
-    const before = taskNow(f);
-    for (const filter of ['available', 'mine', 'all', 'teams', 'tag']) {
-        const groupId = filter === 'teams' ? team.id : filter === 'tag' ? getTaskTag(before).id : null;
+    f.client.taskStorage.updateTask(f.guild.id, f.initial.id, { ...taskNow(f), teamId: team.id, teamName: team.name, dependsOn: [prerequisite.id] });
+    for (const filter of ['available', 'all', 'teams', 'tag', 'ready', 'waiting', 'blocked']) {
+        const groupId = filter === 'teams' ? team.id : filter === 'tag' ? getTaskTag(taskNow(f)).id : null;
         const result = await interact(f, `kanban:list:${filter}:0${groupId ? ':' + groupId : ''}`, { privateMessage: false });
-        assert.ok(!JSON.stringify(result.payload).includes('Hidden target'));
-        assert.ok(!controls(result.payload).some(c => c.options?.some(option => option.value === before.id)));
+        assert.ok(controls(result.payload).some(c => c.options?.some(option => option.value === f.initial.id)));
+        assert.ok(JSON.stringify(result.payload).includes('Waiting on'));
     }
-    assert.match((await interact(f, 'kanban:list:blocked:0')).payload.content, /Only server managers/);
-    assert.match((await interact(f, 'kanban:page:blocked:1')).payload.content, /Only server managers/);
-    for (const action of ['details', 'claim', 'start', 'release', 'edit', 'status', 'team']) {
-        const result = await interact(f, `kanban:${action}:stable-task`, { type: ['status', 'team'].includes(action) ? 'select' : 'button', values: [action === 'team' ? 'none' : 'done'] });
-        assert.match(result.payload.content, /blocked/);
-        assert.ok(!JSON.stringify(result.payload).includes('Hidden target'));
-        assert.deepEqual(taskNow(f), before);
-    }
-    assert.match((await interact(f, 'kanban:select', { type: 'select', values: [before.id] })).payload.content, /blocked/);
-    const replies = [];
-    for (const args of [['details', 'RC-1'], ['done', 'RC-1'], ['depends', 'RC-1', 'none']]) await board.execute({ ...f.actor, reply: async payload => replies.push(payload), channel: { send: async () => assert.fail('blocked task must not be posted publicly') } }, args);
-    assert.ok(replies.every(reply => /could not find/.test(reply)));
-    assert.deepEqual(taskNow(f), before);
+    const detail = (await interact(f, 'kanban:details:stable-task')).payload;
+    assert.ok(ids(detail).includes('kanban:claim:stable-task'));
+    assert.equal(controls(detail).find(c => c.custom_id === 'kanban:start:stable-task').disabled, false);
+    await interact(f, 'kanban:claim:stable-task');
+    assert.equal(taskNow(f).userId, 'alice');
+    assert.ok(controls((await interact(f, 'kanban:list:mine:0')).payload).some(c => c.options?.some(o => o.value === f.initial.id)));
+    await submitEdit(f, await openEdit(f), { description: 'Still editable while waiting' });
+    await interact(f, 'kanban:start:stable-task');
+    assert.equal(taskNow(f).status, 'progress');
+    await interact(f, 'kanban:status:stable-task', { type: 'select', values: ['done'] });
+    assert.equal(taskNow(f).status, 'done');
+    assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).find(t => t.id === prerequisite.id).status, 'todo');
 });
 
-test('admins cannot bypass prerequisites through stale buttons or commands, and can clear them', async () => {
+test('hard gates allow claims but protect Start Work, Review, and Done through buttons and text commands', async () => {
     const f = fixture({ manager: true });
     addPrerequisites(f, 1);
-    await submitEdit(f, await openEdit(f), { dependencies: 'RC-2' });
+    await submitEdit(f, await openEdit(f), { dependencies: '!RC-2' });
+    await interact(f, 'kanban:claim:stable-task');
+    assert.equal(taskNow(f).userId, 'alice');
+    assert.equal(taskNow(f).status, 'todo');
     const before = taskNow(f);
-    for (const [action, options] of [['claim', {}], ['start', {}], ['status', { type: 'select', values: ['progress'] }], ['status', { type: 'select', values: ['review'] }], ['status', { type: 'select', values: ['done'] }]]) {
-        assert.match((await interact(f, `kanban:${action}:stable-task`, options)).payload.content, /blocked by/);
+    for (const [action, options] of [['start', {}], ['status', { type: 'select', values: ['progress'] }], ['status', { type: 'select', values: ['review'] }], ['status', { type: 'select', values: ['done'] }]]) {
+        assert.match((await interact(f, `kanban:${action}:stable-task`, options)).payload.content, /Hard gate/);
         assert.deepEqual(taskNow(f), before);
     }
-    const replies = [];
-    const message = { ...f.actor, reply: async payload => replies.push(payload), channel: { send: async () => assert.fail('blocked details must stay private') } };
-    for (const args of [['claim', 'RC-1'], ['start', 'RC-1'], ['done', 'RC-1'], ['move', 'RC-1', 'review']]) {
-        await board.execute(message, args);
-        assert.match(replies.at(-1), /blocked by/);
-        assert.deepEqual(taskNow(f), before);
+    const replies = [], sent = [];
+    const message = { ...f.actor, reply: async payload => replies.push(payload), channel: { send: async payload => sent.push(payload) } };
+    for (const args of [['start', 'RC-1'], ['done', 'RC-1'], ['move', 'RC-1', 'review']]) {
+        await board.execute(message, args);assert.match(replies.at(-1), /Hard gate/);assert.deepEqual(taskNow(f), before);
     }
     await board.execute(message, ['details', 'RC-1']);
-    assert.match(replies.at(-1), /privately/);
+    assert.ok(sent[0].embeds[0].toJSON().fields.some(field => field.name.includes('Waiting on')));
     await submitEdit(f, await openEdit(f), { dependencies: '' });
-    assert.deepEqual(taskNow(f).dependsOn, []);
-    await interact(f, 'kanban:start:stable-task');
-    assert.equal(getTaskStatus(taskNow(f)), 'progress');
+    assert.deepEqual(taskNow(f).hardDependsOn, []);
+    await interact(f, 'kanban:start:stable-task');assert.equal(getTaskStatus(taskNow(f)), 'progress');
 });
 
 test('invalid dependency edits preserve data and reject cycles, self references, unknown keys, and foreign keys', async () => {
@@ -598,7 +596,7 @@ test('dependency changes conflict with stale edits, while old forms preserve unc
     assert.deepEqual(taskNow(f).dependsOn, ['prerequisite-0']);
 });
 
-test('blocked-task pagination remains private, handles deletion, and blocks a demoted admin', async () => {
+test('waiting pagination remains private and available to every member; edits still require permission', async () => {
     const f = fixture({ manager: true });
     const tasks = Array.from({ length: 27 }, (_, i) => ({ ...f.initial, id: `waiting-${i}`, issueKey: `RC-${i + 1}`, title: `Waiting task ${i}`, dependsOn: ['missing-task'] }));
     f.client.taskStorage.saveTasks(f.guild.id, tasks);
@@ -615,20 +613,19 @@ test('blocked-task pagination remains private, handles deletion, and blocks a de
     const previous = controls(result.payload).find(c => c.label === 'Previous').custom_id;
     const modal = (await interact(f, 'kanban:edit:waiting-0')).payload;
     f.member.permissions.remove(PermissionFlagsBits.ManageGuild);
-    assert.match((await interact(f, previous)).payload.content, /Only server managers/);
-    assert.match((await submitEdit(f, modal, { dependencies: '' })).payload.content, /blocked/);
+    assert.match((await interact(f, previous)).payload.content, /Waiting Tasks/);
+    assert.match((await submitEdit(f, modal, { dependencies: '' })).payload.content, /permission/);
     assert.deepEqual(f.client.taskStorage.getAllTasks(f.guild.id), tasks);
 });
 
-test('a member can add prerequisites to their task; the saved blocked task disappears from their view', async () => {
-    const f = fixture({ task: { createdBy: 'alice', title: 'Hide after setting prerequisites' } });
+test('a member can add soft prerequisites and keep viewing and editing their waiting task', async () => {
+    const f = fixture({ task: { createdBy: 'alice', title: 'Keep visible while waiting' } });
     addPrerequisites(f, 1);
     const result = await submitEdit(f, await openEdit(f), { dependencies: 'RC-2' });
-    assert.match(result.payload.content, /Task saved.*every prerequisite/);
-    assert.equal(result.payload.embeds.length, 0);
-    assert.ok(!JSON.stringify(result.payload).includes('Hide after setting prerequisites'));
+    assert.match(result.payload.content, /saved/);assert.equal(result.payload.embeds.length, 1);
+    assert.ok(JSON.stringify(result.payload).includes('Keep visible while waiting'));
     assert.deepEqual(taskNow(f).dependsOn, ['prerequisite-0']);
-    assert.match((await interact(f, 'kanban:edit:stable-task')).payload.content, /Only server managers/);
+    await submitEdit(f, await openEdit(f), { dependencies: '' });assert.deepEqual(taskNow(f).dependsOn, []);
 });
 
 test('concurrent prerequisite edits cannot create a cycle and saved dependencies survive a storage reload', async () => {
@@ -658,11 +655,11 @@ test('maximum prerequisite forms and task views fit the native modal and message
     const modal = await openEdit(f);
     assert.equal(modal.toJSON().components.find(label => label.component.custom_id === 'dependencies').component.value, input);
     const detail = await interact(f, 'kanban:details:stable-task');
-    assert.equal(detail.payload.embeds[0].toJSON().fields.filter(field => /Blocked by|Prerequisites continued/.test(field.name)).length, 2);
+    assert.equal(detail.payload.embeds[0].toJSON().fields.filter(field => /Waiting on|Prerequisites continued/.test(field.name)).length, 2);
     await interact(f, 'kanban:list:blocked:0');
 });
 
-test('public text-command lists exclude blocked work even when a manager runs them', async () => {
+test('public text-command lists and team counts include waiting work for every member', async () => {
     const f = fixture({ manager: true, task: { userId: 'alice', title: 'Private blocked work' } });
     const [prerequisite] = addPrerequisites(f, 1);
     const team = getConfiguredTeams(f.actor)[0];
@@ -673,10 +670,10 @@ test('public text-command lists exclude blocked work even when a manager runs th
     for (const [key, value] of Object.entries(f.actor)) Object.defineProperty(message, key, { get: () => value });
     for (const args of [['mine'], ['available'], ['teamtasks']]) await board.execute(message, args);
     await teamsCommand.execute(message, []);
-    assert.ok(responses.every(payload => !JSON.stringify(payload).includes('Private blocked work')));
+    assert.ok(JSON.stringify(responses[0]).includes('Private blocked work'));
     for (const payload of responses.slice(-2)) {
         const option = controls(payload).find(c => c.custom_id === 'kanban:teamview').options.find(option => option.value === team.id);
-        assert.equal(option.description, '0 active task(s)');
+        assert.equal(option.description, '1 active task(s)');
     }
 });
 
@@ -691,7 +688,7 @@ test('native edit accepts mixed task and tag prerequisites, shows progress, and 
     assert.deepEqual(taskNow(f).dependsOnTags, ['POWER']);
     assert.ok(result.payload.embeds[0].toJSON().fields.some(field => field.value.includes('[POWER]') && field.value.includes('0/2 Done')));
     const modal = await openEdit(f);
-    assert.match(modal.toJSON().components.find(label => label.component.custom_id === 'dependencies').label, /\[TAG\]/);
+    assert.match(modal.toJSON().components.find(label => label.component.custom_id === 'dependencies').label, /Waiting on/);
     assert.equal(modal.toJSON().components.find(label => label.component.custom_id === 'dependencies').component.value, 'RC-4, [POWER]');
     for (const [i, prerequisite] of power.entries()) {
         await interact(f, `kanban:status:${prerequisite.id}`, { type: 'select', values: ['done'] });
@@ -706,8 +703,8 @@ test('native edit accepts mixed task and tag prerequisites, shows progress, and 
     assert.ok(controls((await interact(f, 'kanban:list:available:0', { userId: memberId })).payload).some(c => c.options?.some(option => option.value === f.initial.id)));
     const later = { ...power[0], id: 'late-power-task', issueKey: 'RC-5', title: '[POWER] Added later', completed: false, status: 'todo' };
     f.client.taskStorage.addTask(f.guild.id, later);
-    assert.ok(!controls((await interact(f, 'kanban:list:all:0', { userId: memberId })).payload).some(c => c.options?.some(option => option.value === f.initial.id)));
-    assert.match((await interact(f, 'kanban:claim:stable-task', { userId: memberId })).payload.content, /blocked/);
+    assert.ok(controls((await interact(f, 'kanban:list:all:0', { userId: memberId })).payload).some(c => c.options?.some(option => option.value === f.initial.id)));
+    assert.match((await interact(f, 'kanban:claim:stable-task', { userId: memberId })).payload.content, /Assigned to you/);
     await interact(f, `kanban:status:${later.id}`, { type: 'select', values: ['done'] });
     await interact(f, 'kanban:start:stable-task', { userId: memberId });
     assert.equal(taskNow(f).userId, memberId);
@@ -772,7 +769,7 @@ test('renaming away the last tag member keeps work blocked and admins can remove
     assert.match(replies.at(-1), /Renamed/);
     const detail = await interact(f, 'kanban:details:stable-task');
     assert.ok(detail.payload.embeds[0].toJSON().fields.some(field => field.value.includes('No tasks found')));
-    assert.match((await interact(f, 'kanban:start:stable-task')).payload.content, /missing/);
+    assert.match((await interact(f, 'kanban:start:stable-task')).payload.content, /Assigned to you/);
     assert.equal((await openEdit(f)).toJSON().components.find(label => label.component.custom_id === 'dependencies').component.value, '[POWER]');
     await submitEdit(f, await openEdit(f), { dependencies: '' });
     assert.match((await interact(f, 'kanban:list:blocked:0')).payload.content, /0 task/);
@@ -1002,17 +999,11 @@ test('unrelated members cannot see or forge task deletion or bulk deletion contr
     assert.equal(f.client.taskDeletes, undefined);
 });
 
-test('blocked task deletion stays hidden from members, including its creator, but managers can delete', async () => {
+test('waiting tasks retain normal deletion permissions for their creator', async () => {
     const f = fixture({ task: { createdBy: 'alice', dependsOn: ['missing'] } });
-    assert.ok(!ids({ components: buildIssueComponents(taskNow(f), f.actor) }).some(id => id.includes('delete')));
-    assert.match((await interact(f, 'kanban:delete:stable-task')).payload.content, /blocked/);
-    f.member.permissions.add(PermissionFlagsBits.ManageGuild);
+    assert.ok(ids({ components: buildIssueComponents(taskNow(f), f.actor) }).includes('kanban:delete:stable-task'));
     const preview = (await interact(f, 'kanban:delete:stable-task')).payload;
-    f.member.permissions.remove(PermissionFlagsBits.ManageGuild);
-    assert.match((await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`)).payload.content, /blocked/);
-    f.member.permissions.add(PermissionFlagsBits.ManageGuild);
-    await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`);
-    assert.equal(storedTasks(f).length, 0);
+    await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`);assert.equal(storedTasks(f).length, 0);
 });
 
 test('bulk tag deletion includes every status, blocked tasks, and team while preserving other tags and guilds', async () => {
@@ -1032,7 +1023,7 @@ test('bulk tag deletion includes every status, blocked tasks, and team while pre
     f.client.taskStorage.setUpdateListener(() => { updates++; });
     const picker = (await interact(f, 'kanban:deletetags:0', { privateMessage: false })).payload;
     const option = controls(picker).find(c => c.options).options.find(o => o.value === getTaskTag(f.initial).id);
-    assert.match(option.description, /5 task\(s\).*1 Done.*1 blocked/);
+    assert.match(option.description, /5 task\(s\).*1 Done.*1 waiting/);
     const preview = await deleteTagPreview(f);
     assert.match(preview.embeds[0].toJSON().description, /5 task\(s\).*POWER/);
     assert.equal(saves, 0);
@@ -1209,14 +1200,14 @@ test('deletion previews name dependency impact and keep direct and empty tag pre
         { ...f.initial, id: 'by-tag', issueKey: 'RC-3', title: '[TEST] Tag', status: 'todo', completed: false, dependsOnTags: ['POWER'] }
     ];
     f.client.taskStorage.saveTasks(f.guild.id, [f.initial, ...dependents]);
-    assert.ok(dependents.every(task => !isBlocked(task, storedTasks(f))));
+    assert.ok(dependents.every(task => !isWaiting(task, storedTasks(f))));
     const preview = await deleteTagPreview(f);
     assert.match(preview.embeds[0].toJSON().description, /2 other task\(s\) reference/);
     await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`);
     assert.deepEqual(storedTasks(f), dependents);
-    assert.ok(storedTasks(f).every(task => isBlocked(task, storedTasks(f))));
+    assert.ok(storedTasks(f).every(task => isWaiting(task, storedTasks(f))));
     f.member.permissions.remove(PermissionFlagsBits.ManageGuild);
-    assert.match((await interact(f, 'kanban:list:available:0')).payload.content, /0 task/);
+    assert.match((await interact(f, 'kanban:list:available:0')).payload.content, /2 task/);
 });
 
 test('unrelated changes do not expand a reviewed deletion, and concurrent confirmations delete only once', async () => {
@@ -1244,4 +1235,74 @@ test('deletion draft storage is bounded and prunes expired previews', async () =
     const draft = [...f.client.taskDeletes.values()][0];
     validateMessage(buildDeletionPreview(draft, f.actor));
     validateMessage(buildDeletionTagPicker(storedTasks(f)));
+});
+
+test('Ready view puts ready tasks first, greys waiting cards, keeps selections enabled, and Ready Only filters them', async () => {
+    const f = fixture({ task: { createdBy: 'alice', dependsOn: ['missing'] } });
+    const ready = { ...f.initial, id: 'ready', issueKey: 'RC-2', title: 'Ready work', dependsOn: [], priority: 'low' };
+    const done = { ...ready, id: 'done', issueKey: 'RC-3', status: 'done', completed: true };
+    f.client.taskStorage.saveTasks(f.guild.id, [taskNow(f), ready, done]);
+    const view = (await interact(f, 'kanban:list:ready:0', { privateMessage: false })).payload;
+    assert.match(view.content, /1 ready.*1 waiting/);
+    assert.equal(view.embeds.length, 2);
+    assert.equal(view.embeds[1].toJSON().color, 0x747f8d);
+    assert.match(view.embeds[1].toJSON().fields[0].value, /Waiting on.*missing/);
+    const selector = controls(view).find(c => c.custom_id === 'kanban:select');
+    assert.deepEqual(selector.options.map(o => o.value), ['ready', 'stable-task']);
+    assert.ok(!selector.disabled);
+    const only = (await interact(f, controls(view).find(c => c.label === 'Ready Only').custom_id)).payload;
+    assert.deepEqual(controls(only).find(c => c.custom_id === 'kanban:select').options.map(o => o.value), ['ready']);
+    assert.ok(ids(only).includes('kanban:list:ready:0'));
+    const detail = (await interact(f, 'kanban:select', { type: 'select', values: ['stable-task'] })).payload;
+    assert.ok(ids(detail).includes('kanban:claim:stable-task'));
+    await interact(f, 'kanban:claim:stable-task');assert.equal(taskNow(f).userId, 'alice');
+});
+
+test('mixed Ready pages expose every active task once and old Available controls still include waiting work', async () => {
+    const f = fixture();
+    const tasks = Array.from({ length: 73 }, (_, i) => ({ ...f.initial, id: `ready-${i}`, issueKey: `RC-${i + 1}`, title: '*'.repeat(200), dependsOn: i % 3 ? ['missing'] : [], hardDependsOn: i % 5 ? [] : ['missing'], teamName: '*'.repeat(50) }));
+    f.client.taskStorage.saveTasks(f.guild.id, tasks);
+    const seen = [];
+    for (let page = 0; page < 8; page++) {
+        const payload = (await interact(f, `kanban:page:ready:${page}`)).payload;
+        seen.push(...controls(payload).find(c => c.custom_id === 'kanban:select').options.map(o => o.value));
+    }
+    assert.equal(new Set(seen).size, 73);assert.equal(seen.length, 73);
+    assert.match((await interact(f, 'kanban:list:available:0')).payload.content, /73 task/);
+    assert.ok(controls((await interact(f, 'kanban:list:waiting:0')).payload).some(c => c.options));
+});
+
+test('members preserve existing hard gates while editing soft links; only managers can change a gate', async () => {
+    const f = fixture({ manager: true, task: { createdBy: 'alice' } });
+    addPrerequisites(f, 2);
+    await submitEdit(f, await openEdit(f), { dependencies: '!RC-2, RC-3' });
+    f.member.permissions.remove(PermissionFlagsBits.ManageGuild);
+    const before = taskNow(f);
+    for (const input of ['RC-2, RC-3', '', '!RC-3']) {
+        assert.match((await submitEdit(f, await openEdit(f), { dependencies: input })).payload.content, /Only server managers/);
+        assert.deepEqual(taskNow(f), before);
+    }
+    assert.match((await submitEdit(f, await openEdit(f), { dependencies: '!RC-2', description: 'Preserve gate, remove a soft link' })).payload.content, /saved/);
+    assert.deepEqual(taskNow(f).hardDependsOn, ['prerequisite-0']);
+    const replies = [];
+    await board.execute({ ...f.actor, reply: async payload => replies.push(payload) }, ['depends', 'RC-1', 'none']);
+    assert.match(replies.at(-1), /Only server managers/);
+    const modal = await openEdit(f);
+    f.client.taskStorage.updateTask(f.guild.id, f.initial.id, { ...taskNow(f), hardDependsOn: [] });
+    assert.match((await submitEdit(f, modal, { description: 'Stale gate' })).payload.content, /changed while/);
+});
+
+test('members can claim hard-gated tasks and start only when hard links finish even if soft links are unfinished', async () => {
+    const f = fixture({ manager: true });
+    const [hard, soft] = addPrerequisites(f, 2);
+    await submitEdit(f, await openEdit(f), { dependencies: '!RC-2, RC-3' });
+    f.member.permissions.remove(PermissionFlagsBits.ManageGuild);
+    await interact(f, 'kanban:claim:stable-task');assert.equal(taskNow(f).userId, 'alice');
+    const before = taskNow(f);
+    assert.match((await interact(f, 'kanban:start:stable-task')).payload.content, /Hard gate/);
+    assert.deepEqual(taskNow(f), before);
+    await interact(f, `kanban:status:${hard.id}`, { type: 'select', values: ['done'] });
+    await interact(f, 'kanban:start:stable-task');assert.equal(taskNow(f).status, 'progress');
+    assert.equal(storedTasks(f).find(t => t.id === soft.id).status, 'todo');
+    await interact(f, 'kanban:status:stable-task', { type: 'select', values: ['done'] });assert.equal(taskNow(f).status, 'done');
 });

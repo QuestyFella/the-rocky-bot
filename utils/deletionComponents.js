@@ -2,7 +2,7 @@ const { ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, E
 const { groupTasksByTag } = require('./taskTags');
 const { getIssueKey, getTaskStatus, columns } = require('./kanban');
 const { getTaskTeam } = require('./teams');
-const { isBlocked } = require('./taskDependencies');
+const { isWaiting } = require('./taskDependencies');
 
 const pageSize = 5;
 const tagPageSize = 25;
@@ -19,7 +19,7 @@ function buildDeletionTagPicker(tasks, requestedPage = 0) {
         .setCustomId('kanban:deletetag').setPlaceholder('Choose a title tag to preview its tasks')
         .addOptions(tags.slice(page * tagPageSize, (page + 1) * tagPageSize).map(tag => ({
             label: short(tag.name, 100), value: tag.id,
-            description: `${tag.tasks.length} task(s) · ${tag.tasks.filter(task => getTaskStatus(task) === 'done').length} Done · ${tag.tasks.filter(task => isBlocked(task, tasks)).length} blocked`
+            description: `${tag.tasks.length} task(s) · ${tag.tasks.filter(task => getTaskStatus(task) === 'done').length} Done · ${tag.tasks.filter(task => isWaiting(task, tasks)).length} waiting`
         })))));
     if (pages > 1) components.push(new ActionRowBuilder().addComponents(
         button(`kanban:deletetags:${page - 1}`, 'Previous').setDisabled(page === 0),
@@ -27,7 +27,7 @@ function buildDeletionTagPicker(tasks, requestedPage = 0) {
     ));
     components.push(new ActionRowBuilder().addComponents(button('kanban:more', 'More')));
     return {
-        content: `**Delete Tag Tasks**${pages > 1 ? ` · Page ${page + 1}/${pages}` : ''}\n${tags.length ? 'Choose a [TAG] from task titles. General contains tasks without a title tag. The preview includes every task in that tag, across all teams and statuses, including blocked tasks. You will confirm before deleting.' : 'No tasks to delete.'}`,
+        content: `**Delete Tag Tasks**${pages > 1 ? ` · Page ${page + 1}/${pages}` : ''}\n${tags.length ? 'Choose a [TAG] from task titles. General contains tasks without a title tag. The preview includes every task in that tag, across all teams and statuses, including waiting tasks. You will confirm before deleting.' : 'No tasks to delete.'}`,
         embeds: [], components, allowedMentions: { parse: [] }
     };
 }
@@ -36,7 +36,7 @@ function buildDeletionPreview(draft, actor, requestedPage = 0) {
     const pages = Math.max(1, Math.ceil(draft.tasks.length / pageSize));
     const page = pageNumber(requestedPage, pages);
     const embed = new EmbedBuilder().setColor(0xed4245).setTitle('Task deletion preview')
-        .setDescription(`**${draft.tasks.length} task(s) will be permanently deleted**${draft.tag ? ` from **${escapeMarkdown(draft.tag.name)}**` : ''}.\n${draft.tag ? 'Includes all teams and statuses, including completed and blocked tasks.\n' : ''}Only you can confirm this deletion.${draft.references ? `\n${draft.references} other task(s) reference these tasks or their tags. Prerequisites are kept; missing tasks and empty tags block unfinished work.` : ''}`)
+        .setDescription(`**${draft.tasks.length} task(s) will be permanently deleted**${draft.tag ? ` from **${escapeMarkdown(draft.tag.name)}**` : ''}.\n${draft.tag ? 'Includes all teams and statuses, including completed and waiting tasks.\n' : ''}Only you can confirm this deletion.${draft.references ? `\n${draft.references} other task(s) reference these tasks or their tags. References are kept: missing prerequisites show Waiting, and hard gates hold Start Work and completion.` : ''}`)
         .setFooter({ text: `Page ${page + 1}/${pages} · Preview expires after 15 minutes` });
     for (const task of draft.tasks.slice(page * pageSize, (page + 1) * pageSize)) embed.addFields({
         name: short(`${getIssueKey(task) || task.id}: ${task.title}`, 256),

@@ -8,14 +8,11 @@ const { readImportInput, prepareImport, getImportDraft, commitImport } = require
 const { buildImportPreview, buildImportErrors } = require('./importComponents');
 const { prepareEdit, saveEdit } = require('./taskEditing');
 const { groupTasksByTag } = require('./taskTags');
-const { isBlocked, canViewTask, blockingError } = require('./taskDependencies');
+const { blockingError } = require('./taskDependencies');
 const { prepareDeletion, getDeletionDraft, reviewDeletion, commitDeletion } = require('./taskDeletion');
 const { buildDeletionTagPicker, buildDeletionPreview } = require('./deletionComponents');
 
 function issuePayload(actor, task, content = '') {
-    if (!canViewTask(task, actor.client.taskStorage.getAllTasks(actor.guild.id), actor)) {
-        return buildMoreMenu(actor, content ? 'Task saved. It will appear when every prerequisite is Done.' : 'This task is blocked. It will appear when every prerequisite is Done.');
-    }
     return {
         content,
         embeds: [board.buildIssueEmbed(task, 0, actor)],
@@ -52,7 +49,6 @@ async function handleBoardInteraction(interaction) {
         const task = tasks.find(task => String(task.id) === target);
         let error;
         if (!task) error = 'This task no longer exists. Open Browse Tasks to choose another.';
-        else if (!canViewTask(task, tasks, modalActor)) error = 'This task is blocked. Only server managers can view or manage it until its prerequisites are Done.';
         else if (!userCanManageIssue(modalActor, task)) error = 'You do not have permission to edit this task.';
         else if ((task.title || '').length > 4000 || (task.description || '').length > 4000) error = 'This task has text longer than the edit form supports. Use the text commands to edit it.';
         if (error) await interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
@@ -229,11 +225,9 @@ async function handleBoardInteraction(interaction) {
 
     if (['list', 'page', 'teamview', 'teamlist'].includes(action)) {
         const allTasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
-        const filter = action === 'teamview' ? 'teams' : ['available', 'mine', 'all', 'teams', 'tag', 'blocked'].includes(target) ? target : 'all';
+        const filter = action === 'teamview' ? 'teams' : target === 'blocked' ? 'waiting' : ['ready', 'readyonly', 'waiting', 'available', 'mine', 'all', 'teams', 'tag'].includes(target) ? target : 'all';
         const teamId = action === 'teamview' ? interaction.values?.[0] : selectedTeamId;
-        if (filter === 'blocked' && !isManager(actor)) {
-            await replyError('Only server managers can view blocked tasks. Unlocked work appears in Available Tasks.');
-        } else if (filter === 'tag' && !groupTasksByTag(allTasks.filter(task => !isBlocked(task, allTasks))).some(tag => tag.id === teamId)) {
+        if (filter === 'tag' && !groupTasksByTag(allTasks).some(tag => tag.id === teamId)) {
             await interaction.editReply(buildMoreMenu(actor, 'This tag no longer has tasks. Use Browse Tasks to see the current list.'));
         } else if (action === 'teamlist' || (filter === 'teams' && !teamId)) {
             await interaction.editReply(buildTeamPicker(allTasks, actor, action === 'teamlist' ? target : 0));
@@ -264,15 +258,12 @@ async function handleBoardInteraction(interaction) {
         await replyError('This task no longer exists. Open Browse Tasks to choose another.');
         return true;
     }
-    if (!canViewTask(task, tasks, actor)) {
-        await replyError('This task is blocked. It will appear when every prerequisite is Done.');
-        return true;
-    }
 
     let error = null;
     let content = '';
     if (action === 'claim' || action === 'start') {
         error = claimError(actor, task);
+        if (!error && action === 'start') error = blockingError(task, tasks);
         if (!error) {
             preserveTaskTeam(task, actor);
             task.userId = interaction.user.id;
