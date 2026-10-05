@@ -34,8 +34,8 @@ function buildMoreMenu(actor, content = '') {
     if (isManager(actor)) controls.push(button('kanban:import', 'Import Tasks'), button('kanban:teamsetup', 'Setup Teams'), button('kanban:refresh', 'Refresh Board'));
     controls.push(button('kanban:add', 'Add Task', ButtonStyle.Primary));
     return {
-        content: `${content ? `${content}\n\n` : ''}**More task controls**\nBrowse ${isManager(actor) ? 'all' : 'unlocked'} tasks, including completed work.${isManager(actor) ? '\nManager controls: view blocked tasks, import a task list, set up team labels, or refresh the live board.' : ''}`,
-        embeds: [], components: [new ActionRowBuilder().addComponents(controls), ...(isManager(actor) ? [new ActionRowBuilder().addComponents(button('kanban:list:blocked:0', 'Blocked Tasks'))] : [])], allowedMentions: { parse: [] }
+        content: `${content ? `${content}\n\n` : ''}**More task controls**\nBrowse ${isManager(actor) ? 'all' : 'unlocked'} tasks, including completed work.${isManager(actor) ? '\nManager controls: view blocked tasks, import a task list, set up team labels, refresh the live board, or delete tasks by tag.' : ''}`,
+        embeds: [], components: [new ActionRowBuilder().addComponents(controls), ...(isManager(actor) ? [new ActionRowBuilder().addComponents(button('kanban:list:blocked:0', 'Blocked Tasks'), button('kanban:deletetags:0', 'Delete Tag Tasks', ButtonStyle.Danger))] : [])], allowedMentions: { parse: [] }
     };
 }
 
@@ -136,9 +136,10 @@ function buildIssueComponents(task, actor) {
         if (getTaskStatus(task) !== 'progress') controls.push(button(`kanban:start:${id}`, 'Start Work', ButtonStyle.Primary));
     }
     if (task.userId && !releaseError(actor, task)) controls.push(button(`kanban:release:${id}`, 'Release'));
-    if (userCanManageIssue(actor, task)) controls.push(button(`kanban:edit:${id}`, 'Edit Task', ButtonStyle.Primary));
-    controls.push(button(`kanban:details:${id}`, 'Refresh'), button('kanban:list:mine:0', 'My Tasks'));
-    const components = [new ActionRowBuilder().addComponents(controls)];
+    if (userCanManageIssue(actor, task)) controls.push(button(`kanban:edit:${id}`, 'Edit Task', ButtonStyle.Primary), button(`kanban:delete:${id}`, 'Delete Task', ButtonStyle.Danger));
+    const components = [];
+    if (controls.length) components.push(new ActionRowBuilder().addComponents(controls));
+    components.push(new ActionRowBuilder().addComponents(button(`kanban:details:${id}`, 'Refresh'), button('kanban:list:mine:0', 'My Tasks')));
     if (userCanManageIssue(actor, task)) {
         components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
             .setCustomId(`kanban:status:${id}`)

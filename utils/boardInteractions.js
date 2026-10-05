@@ -1,4 +1,4 @@
-const { MessageFlags, PermissionFlagsBits } = require('discord.js');
+const { MessageFlags, PermissionFlagsBits, escapeMarkdown } = require('discord.js');
 const board = require('../commands/board');
 const { canRunInChannel, getCachedServerConfig } = require('./serverConfig');
 const { buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks } = require('./boardComponents');
@@ -9,6 +9,8 @@ const { buildImportPreview, buildImportErrors } = require('./importComponents');
 const { prepareEdit, saveEdit } = require('./taskEditing');
 const { groupTasksByTag } = require('./taskTags');
 const { isBlocked, canViewTask, blockingError } = require('./taskDependencies');
+const { prepareDeletion, getDeletionDraft, reviewDeletion, commitDeletion } = require('./taskDeletion');
+const { buildDeletionTagPicker, buildDeletionPreview } = require('./deletionComponents');
 
 function issuePayload(actor, task, content = '') {
     if (!canViewTask(task, actor.client.taskStorage.getAllTasks(actor.guild.id), actor)) {
@@ -98,6 +100,39 @@ async function handleBoardInteraction(interaction) {
 
     if (action === 'more') {
         await interaction.editReply(buildMoreMenu(actor));
+        return true;
+    }
+
+    if (['delete', 'deletetags', 'deletetag', 'deletepage', 'deleteconfirm', 'deletecancel'].includes(action)) {
+        if (['deletetags', 'deletetag'].includes(action)) {
+            if (!isManager(actor)) await replyError('You need Manage Server permission to delete tasks by tag.');
+            else if (action === 'deletetags') await interaction.editReply(buildDeletionTagPicker(actor.client.taskStorage.getAllTasks(actor.guild.id), target));
+            else {
+                const result = prepareDeletion(actor, { tagId: interaction.values?.[0] });
+                if (result.error) await replyError(result.error);
+                else await interaction.editReply(buildDeletionPreview(result.draft, actor));
+            }
+        } else if (action === 'delete') {
+            const result = prepareDeletion(actor, { taskId: target });
+            if (result.error) await replyError(result.error);
+            else await interaction.editReply(buildDeletionPreview(result.draft, actor));
+        } else if (action === 'deletecancel') {
+            const result = getDeletionDraft(actor, target);
+            if (result.error) await replyError(result.error);
+            else {
+                actor.client.taskDeletes.delete(target);
+                await interaction.editReply(buildMoreMenu(actor, 'Deletion cancelled. No tasks were deleted.'));
+            }
+        } else if (action === 'deletepage') {
+            const result = reviewDeletion(actor, target);
+            if (result.error) await replyError(result.error);
+            else await interaction.editReply(buildDeletionPreview(result.draft, actor, page));
+        } else {
+            const result = commitDeletion(actor, target);
+            if (result.error && result.draft) await interaction.editReply({ ...buildDeletionPreview(result.draft, actor), content: result.error });
+            else if (result.error) await replyError(result.error);
+            else await interaction.editReply(buildMoreMenu(actor, `Deleted **${result.deleted} task(s)**${result.tag ? ` from **${escapeMarkdown(result.tag.name)}**` : ''}.`));
+        }
         return true;
     }
 

@@ -13,6 +13,8 @@ const { handleBoardInteraction } = require('../utils/boardInteractions');
 const { buildBoardComponents, buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, pageSize } = require('../utils/boardComponents');
 const { getTaskStatus } = require('../utils/kanban');
 const { getTaskTag } = require('../utils/taskTags');
+const { isBlocked } = require('../utils/taskDependencies');
+const { buildDeletionTagPicker, buildDeletionPreview } = require('../utils/deletionComponents');
 const { saveTeams, getConfiguredTeams } = require('../utils/teams');
 const { prepareImport } = require('../utils/taskImport');
 const importCommand = require('../commands/import');
@@ -129,7 +131,7 @@ test('shared board stays simple and More privately hides every manager control f
     assert.deepEqual(controls(result.payload).map(c => c.label), ['Browse Tasks', 'Add Task']);
     const admin = fixture({ manager: true });
     const privateMenu = (await interact(admin, 'kanban:more', { privateMessage: false })).payload;
-    assert.deepEqual(controls(privateMenu).map(c => c.label), ['Browse Tasks', 'Import Tasks', 'Setup Teams', 'Refresh Board', 'Add Task', 'Blocked Tasks']);
+    assert.deepEqual(controls(privateMenu).map(c => c.label), ['Browse Tasks', 'Import Tasks', 'Setup Teams', 'Refresh Board', 'Add Task', 'Blocked Tasks', 'Delete Tag Tasks']);
     for (const payload of [buildTeamPicker([], admin.actor), buildTaskPicker([], 'all', 0, admin.actor), { components: buildBoardComponents() }]) {
         assert.ok(!ids(payload).some(id => /kanban:(teamsetup|import|refresh)/.test(id)));
     }
@@ -949,4 +951,297 @@ test('imports handle preview navigation, removed teams, and storage failure retr
     f.client.taskStorage.saveTasks = originalSave;
     await interact(f, `kanban:importconfirm:${retry.id}`);
     assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).length, 13);
+});
+
+const deletionId = payload => ids(payload).find(id => id.startsWith('kanban:deleteconfirm:')).split(':')[2];
+const storedTasks = f => f.client.taskStorage.getAllTasks(f.guild.id);
+async function deleteTagPreview(f, tagId = getTaskTag(taskNow(f)).id) {
+    return (await interact(f, 'kanban:deletetag', { type: 'select', values: [tagId] })).payload;
+}
+
+test('single task deletion previews privately, cancels, then deletes only after confirmation', async () => {
+    const f = fixture({ task: { createdBy: 'alice' } });
+    assert.ok(ids({ components: buildIssueComponents(taskNow(f), f.actor) }).includes('kanban:delete:stable-task'));
+    let preview = await interact(f, 'kanban:delete:stable-task', { privateMessage: false });
+    assert.equal(preview.responses[0][1].flags, MessageFlags.Ephemeral);
+    assert.match(preview.payload.embeds[0].toJSON().description, /1 task\(s\).*permanently deleted/);
+    assert.deepEqual(storedTasks(f), [f.initial]);
+    const cancelledId = deletionId(preview.payload);
+    assert.match((await interact(f, `kanban:deletecancel:${cancelledId}`)).payload.content, /cancelled/);
+    assert.deepEqual(storedTasks(f), [f.initial]);
+    assert.match((await interact(f, `kanban:deleteconfirm:${cancelledId}`)).payload.content, /expired|already used/);
+    preview = await interact(f, 'kanban:delete:stable-task');
+    assert.match((await interact(f, `kanban:deleteconfirm:${deletionId(preview.payload)}`)).payload.content, /Deleted \*\*1 task/);
+    assert.deepEqual(storedTasks(f), []);
+    assert.deepEqual(new TaskStorage(f.client.taskStorage.tasksDir).getAllTasks(f.guild.id), []);
+    for (const action of ['details', 'delete', 'claim', 'edit']) assert.match((await interact(f, `kanban:${action}:stable-task`)).payload.content, /no longer exists/);
+});
+
+test('single task Delete button and workflow follow current edit permissions for each allowed actor', async () => {
+    for (const scenario of ['creator', 'assignee', 'assigner', 'role', 'manager', 'administrator']) {
+        const changes = { creator: { createdBy: 'alice' }, assignee: { userId: 'alice' }, assigner: { assignedBy: 'alice' }, role: { assignedToRole: 'engineering' } };
+        const f = fixture({ manager: scenario === 'manager', task: changes[scenario] || {} });
+        if (scenario === 'administrator') f.member.permissions.add(PermissionFlagsBits.Administrator);
+        if (scenario === 'role') f.member.roles.cache.set('engineering', { id: 'engineering' });
+        assert.ok(ids({ components: buildIssueComponents(taskNow(f), f.actor) }).includes('kanban:delete:stable-task'), scenario);
+        const preview = (await interact(f, 'kanban:delete:stable-task')).payload;
+        await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`);
+        assert.equal(storedTasks(f).length, 0, scenario);
+    }
+});
+
+test('unrelated members cannot see or forge task deletion or bulk deletion controls', async () => {
+    const f = fixture();
+    assert.ok(!ids({ components: buildIssueComponents(taskNow(f), f.actor) }).some(id => id.startsWith('kanban:delete:')));
+    assert.ok(!ids(buildMoreMenu(f.actor)).some(id => id.startsWith('kanban:deletetags')));
+    for (const [id, options, expected] of [
+        ['kanban:delete:stable-task', {}, /permission/], ['kanban:deletetags:0', {}, /Manage Server/],
+        ['kanban:deletetag', { type: 'select', values: [getTaskTag(f.initial).id] }, /Manage Server/]
+    ]) assert.match((await interact(f, id, options)).payload.content, expected);
+    assert.deepEqual(storedTasks(f), [f.initial]);
+    assert.equal(f.client.taskDeletes, undefined);
+});
+
+test('blocked task deletion stays hidden from members, including its creator, but managers can delete', async () => {
+    const f = fixture({ task: { createdBy: 'alice', dependsOn: ['missing'] } });
+    assert.ok(!ids({ components: buildIssueComponents(taskNow(f), f.actor) }).some(id => id.includes('delete')));
+    assert.match((await interact(f, 'kanban:delete:stable-task')).payload.content, /blocked/);
+    f.member.permissions.add(PermissionFlagsBits.ManageGuild);
+    const preview = (await interact(f, 'kanban:delete:stable-task')).payload;
+    f.member.permissions.remove(PermissionFlagsBits.ManageGuild);
+    assert.match((await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`)).payload.content, /blocked/);
+    f.member.permissions.add(PermissionFlagsBits.ManageGuild);
+    await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`);
+    assert.equal(storedTasks(f).length, 0);
+});
+
+test('bulk tag deletion includes every status, blocked tasks, and team while preserving other tags and guilds', async () => {
+    const f = fixture({ manager: true, task: { title: '[POWER] Battery' } });
+    const candidates = [taskNow(f), ...['progress', 'review', 'done', 'todo'].map((status, i) => ({
+        ...f.initial, id: `tag-task-${i}`, issueKey: `RC-${i + 2}`, title: `${i % 2 ? '[power]' : ' [ POWER ]'} Task ${i}`,
+        status, completed: status === 'done', teamId: i % 2 ? 'software' : 'cubesat', teamName: i % 2 ? 'Software' : 'Cubesat',
+        dependsOn: status === 'todo' ? ['missing'] : []
+    }))];
+    const other = { ...f.initial, id: 'other-tag', issueKey: 'RC-6', title: '[STM32] Keep this task' };
+    f.client.taskStorage.saveTasks(f.guild.id, [...candidates, other]);
+    f.client.taskStorage.getAllTasks('other-guild');
+    f.client.taskStorage.saveTasks('other-guild', [f.initial]);
+    let saves = 0, updates = 0;
+    const save = f.client.taskStorage.saveTasks.bind(f.client.taskStorage);
+    f.client.taskStorage.saveTasks = (...args) => { saves++; return save(...args); };
+    f.client.taskStorage.setUpdateListener(() => { updates++; });
+    const picker = (await interact(f, 'kanban:deletetags:0', { privateMessage: false })).payload;
+    const option = controls(picker).find(c => c.options).options.find(o => o.value === getTaskTag(f.initial).id);
+    assert.match(option.description, /5 task\(s\).*1 Done.*1 blocked/);
+    const preview = await deleteTagPreview(f);
+    assert.match(preview.embeds[0].toJSON().description, /5 task\(s\).*POWER/);
+    assert.equal(saves, 0);
+    assert.equal(updates, 0);
+    const result = await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`);
+    assert.match(result.payload.content, /Deleted \*\*5 task/);
+    assert.deepEqual(storedTasks(f), [other]);
+    assert.deepEqual(f.client.taskStorage.getAllTasks('other-guild'), [f.initial]);
+    assert.equal(saves, 1);
+    assert.equal(updates, 1);
+});
+
+test('General deletion includes untagged and explicit General titles, with stale and empty picker handling', async () => {
+    const f = fixture({ manager: true });
+    const general = { ...f.initial, id: 'general', title: '[GENERAL] Also general' };
+    const keep = { ...f.initial, id: 'tagged', title: '[OTHER] Keep me' };
+    f.client.taskStorage.saveTasks(f.guild.id, [f.initial, general, keep]);
+    const preview = await deleteTagPreview(f);
+    await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`);
+    assert.deepEqual(storedTasks(f), [keep]);
+    assert.match((await deleteTagPreview(f, getTaskTag(f.initial).id)).content, /no longer has tasks/);
+    f.client.taskStorage.saveTasks(f.guild.id, []);
+    const empty = (await interact(f, 'kanban:deletetags:0')).payload;
+    assert.match(empty.content, /No tasks to delete/);
+    assert.ok(!controls(empty).some(c => c.options));
+    assert.match((await interact(f, 'kanban:deletetag', { type: 'select', values: [] })).payload.content, /no longer has tasks/);
+});
+
+test('all tags and every deletion candidate remain reachable through paginated previews', async () => {
+    const f = fixture({ manager: true });
+    const tasks = Array.from({ length: 70 }, (_, i) => ({ ...f.initial, id: `many-${i}`, issueKey: `RC-${i + 1}`, title: `[GROUP ${String(i).padStart(2, '0')}] Task ${i}` }));
+    f.client.taskStorage.saveTasks(f.guild.id, tasks);
+    const selected = [];
+    for (const page of [0, 1, 2]) {
+        const picker = (await interact(f, `kanban:deletetags:${page}`)).payload;
+        selected.push(...controls(picker).find(c => c.options).options.map(o => o.value));
+        validateMessage(picker);
+    }
+    assert.equal(new Set(selected).size, 70);
+    assert.match((await interact(f, 'kanban:deletetags:999')).payload.content, /Page 3\/3/);
+    tasks.forEach(task => { task.title = '[POWER] ' + '*'.repeat(200); task.description = '*'.repeat(4000); task.teamName = '*'.repeat(100); });
+    f.client.taskStorage.saveTasks(f.guild.id, tasks);
+    const preview = await deleteTagPreview(f);
+    const id = deletionId(preview);
+    const titles = [];
+    for (let page = 0; page < 14; page++) {
+        const result = (await interact(f, `kanban:deletepage:${id}:${page}`)).payload;
+        titles.push(...result.embeds[0].toJSON().fields.map(field => field.name.split(':')[0]));
+    }
+    assert.equal(new Set(titles).size, 70);
+    assert.match((await interact(f, `kanban:deletepage:${id}:999`)).payload.embeds[0].toJSON().footer.text, /Page 14\/14/);
+    assert.deepEqual(storedTasks(f), tasks);
+});
+
+test('changed, retagged, added, removed, claimed, or completed candidates invalidate a bulk deletion preview', async () => {
+    for (const scenario of ['edit', 'retag', 'add', 'remove', 'claim', 'complete', 'dependency', 'team']) {
+        const f = fixture({ manager: true, task: { title: '[POWER] Battery' } });
+        const second = { ...f.initial, id: 'second', issueKey: 'RC-2' };
+        f.client.taskStorage.addTask(f.guild.id, second);
+        const preview = await deleteTagPreview(f);
+        const id = deletionId(preview);
+        if (scenario === 'add') f.client.taskStorage.addTask(f.guild.id, { ...second, id: 'third', issueKey: 'RC-3' });
+        else if (scenario === 'remove') f.client.taskStorage.deleteTask(f.guild.id, second.id);
+        else {
+            const changes = { edit: { description: 'Changed' }, retag: { title: '[STM32] Moved' }, claim: { userId: 'bob' }, complete: { status: 'done', completed: true }, dependency: { dependsOn: ['missing'] }, team: { teamName: 'Another team' } };
+            f.client.taskStorage.updateTask(f.guild.id, second.id, { ...second, ...changes[scenario] });
+        }
+        const before = storedTasks(f);
+        const result = await interact(f, `kanban:deleteconfirm:${id}`);
+        assert.match(result.payload.content, /Tasks changed.*No tasks were deleted/, scenario);
+        assert.deepEqual(storedTasks(f), before);
+        assert.equal(f.client.taskDeletes.has(id), false);
+    }
+});
+
+test('single deletion detects intervening edits and never deletes a replacement with the same issue key', async () => {
+    for (const scenario of ['edit', 'replacement']) {
+        const f = fixture({ task: { createdBy: 'alice' } });
+        const preview = (await interact(f, 'kanban:delete:stable-task')).payload;
+        if (scenario === 'edit') f.client.taskStorage.updateTask(f.guild.id, f.initial.id, { ...taskNow(f), description: 'Updated by another person' });
+        else {
+            f.client.taskStorage.deleteTask(f.guild.id, f.initial.id);
+            f.client.taskStorage.addTask(f.guild.id, { ...f.initial, id: 'replacement' });
+        }
+        const before = storedTasks(f);
+        assert.match((await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`)).payload.content, /changed|no longer exists/);
+        assert.deepEqual(storedTasks(f), before);
+    }
+});
+
+test('bulk deletion page and confirmation recheck freshly fetched manager permissions', async () => {
+    const f = fixture({ manager: true });
+    const preview = await deleteTagPreview(f);
+    const id = deletionId(preview);
+    const demoted = { pending: false, permissions: new PermissionsBitField(), roles: { cache: new Collection() } };
+    f.guild.members.fetch = async options => { assert.deepEqual(options, { user: 'alice', force: true }); return demoted; };
+    for (const action of ['deletepage', 'deleteconfirm']) assert.match((await interact(f, `kanban:${action}:${id}:0`)).payload.content, /Manage Server/);
+    assert.deepEqual(storedTasks(f), [f.initial]);
+    assert.match((await interact(f, `kanban:deletecancel:${id}`)).payload.content, /cancelled/);
+});
+
+test('single deletion rechecks assignee, manager, and role permissions on confirmation', async () => {
+    for (const scenario of ['assignee', 'manager', 'role']) {
+        const f = fixture({ manager: scenario === 'manager', task: scenario === 'assignee' ? { userId: 'alice' } : scenario === 'role' ? { assignedToRole: 'engineering' } : {} });
+        if (scenario === 'role') f.member.roles.cache.set('engineering', { id: 'engineering' });
+        const preview = (await interact(f, 'kanban:delete:stable-task')).payload;
+        if (scenario === 'assignee') f.client.taskStorage.updateTask(f.guild.id, f.initial.id, { ...taskNow(f), userId: 'charlie' });
+        else if (scenario === 'manager') f.member.permissions.remove(PermissionFlagsBits.ManageGuild);
+        else f.member.roles.cache.clear();
+        const before = storedTasks(f);
+        assert.match((await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`)).payload.content, /permission/);
+        assert.deepEqual(storedTasks(f), before);
+    }
+});
+
+test('deletion drafts enforce owner, original channel, and guild for pages, confirmation, and cancel', async () => {
+    for (const action of ['deletepage', 'deleteconfirm', 'deletecancel']) for (const options of [{ userId: 'mallory' }, { channelId: 'another-channel' }, { guildId: 'another-guild' }]) {
+        const f = fixture({ manager: true });
+        const preview = await deleteTagPreview(f);
+        const id = deletionId(preview);
+        const originalId = f.guild.id;
+        if (options.guildId) f.guild.id = options.guildId;
+        assert.match((await interact(f, `kanban:${action}:${id}:0`, options)).payload.content, /Only the person/);
+        f.guild.id = originalId;
+        assert.deepEqual(storedTasks(f), [f.initial]);
+        assert.ok(f.client.taskDeletes.has(id));
+    }
+});
+
+test('expired, replayed, cancelled, and pre-restart deletion previews cannot delete tasks', async () => {
+    for (const scenario of ['expired', 'replay', 'cancelled', 'restart']) {
+        const f = fixture({ manager: true });
+        const preview = await deleteTagPreview(f);
+        const id = deletionId(preview);
+        if (scenario === 'expired') f.client.taskDeletes.get(id).expiresAt = Date.now() - 1;
+        else if (scenario === 'restart') delete f.client.taskDeletes;
+        else await interact(f, `kanban:${scenario === 'cancelled' ? 'deletecancel' : 'deleteconfirm'}:${id}`);
+        const before = storedTasks(f);
+        assert.match((await interact(f, `kanban:deleteconfirm:${id}`)).payload.content, /expired|already used/);
+        assert.deepEqual(storedTasks(f), before);
+    }
+});
+
+test('atomic deletion write failure preserves disk and cache, does not refresh, and can be retried', async () => {
+    const f = fixture({ manager: true });
+    const preview = await deleteTagPreview(f);
+    const id = deletionId(preview);
+    const file = f.client.taskStorage.getFilePath(f.guild.id);
+    const before = fs.readFileSync(file, 'utf8');
+    let updates = 0;
+    f.client.taskStorage.setUpdateListener(() => { updates++; });
+    const rename = fs.renameSync;
+    const log = console.error;
+    let result;
+    try {
+        fs.renameSync = () => { throw new Error('simulated disk failure'); };
+        console.error = () => {};
+        result = await interact(f, `kanban:deleteconfirm:${id}`);
+    } finally { fs.renameSync = rename; console.error = log; }
+    assert.match(result.payload.content, /Failed to delete.*No tasks were deleted/);
+    assert.ok(ids(result.payload).includes(`kanban:deleteconfirm:${id}`));
+    assert.deepEqual(storedTasks(f), [f.initial]);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    assert.equal(updates, 0);
+    await interact(f, `kanban:deleteconfirm:${id}`);
+    assert.deepEqual(storedTasks(f), []);
+    assert.equal(updates, 1);
+});
+
+test('deletion previews name dependency impact and keep direct and empty tag prerequisites blocked', async () => {
+    const f = fixture({ manager: true, task: { title: '[POWER] Battery', status: 'done', completed: true } });
+    const dependents = [
+        { ...f.initial, id: 'direct', issueKey: 'RC-2', title: '[TEST] Direct', status: 'todo', completed: false, dependsOn: ['stable-task'] },
+        { ...f.initial, id: 'by-tag', issueKey: 'RC-3', title: '[TEST] Tag', status: 'todo', completed: false, dependsOnTags: ['POWER'] }
+    ];
+    f.client.taskStorage.saveTasks(f.guild.id, [f.initial, ...dependents]);
+    assert.ok(dependents.every(task => !isBlocked(task, storedTasks(f))));
+    const preview = await deleteTagPreview(f);
+    assert.match(preview.embeds[0].toJSON().description, /2 other task\(s\) reference/);
+    await interact(f, `kanban:deleteconfirm:${deletionId(preview)}`);
+    assert.deepEqual(storedTasks(f), dependents);
+    assert.ok(storedTasks(f).every(task => isBlocked(task, storedTasks(f))));
+    f.member.permissions.remove(PermissionFlagsBits.ManageGuild);
+    assert.match((await interact(f, 'kanban:list:available:0')).payload.content, /0 task/);
+});
+
+test('unrelated changes do not expand a reviewed deletion, and concurrent confirmations delete only once', async () => {
+    const f = fixture({ manager: true, task: { title: '[POWER] Battery' } });
+    const preview = await deleteTagPreview(f);
+    const id = deletionId(preview);
+    const other = { ...f.initial, id: 'other', issueKey: 'RC-2', title: '[OTHER] Added after preview' };
+    f.client.taskStorage.addTask(f.guild.id, other);
+    let updates = 0;
+    f.client.taskStorage.setUpdateListener(() => { updates++; });
+    const results = await Promise.all([interact(f, `kanban:deleteconfirm:${id}`), interact(f, `kanban:deleteconfirm:${id}`)]);
+    assert.equal(results.filter(r => /Deleted \*\*1 task/.test(r.payload.content)).length, 1);
+    assert.equal(results.filter(r => /expired|already used/.test(r.payload.content)).length, 1);
+    assert.deepEqual(storedTasks(f), [other]);
+    assert.equal(updates, 1);
+});
+
+test('deletion draft storage is bounded and prunes expired previews', async () => {
+    const f = fixture({ manager: true });
+    for (let i = 0; i < 105; i++) await deleteTagPreview(f);
+    assert.equal(f.client.taskDeletes.size, 100);
+    for (const draft of f.client.taskDeletes.values()) draft.expiresAt = Date.now() - 1;
+    await deleteTagPreview(f);
+    assert.equal(f.client.taskDeletes.size, 1);
+    const draft = [...f.client.taskDeletes.values()][0];
+    validateMessage(buildDeletionPreview(draft, f.actor));
+    validateMessage(buildDeletionTagPicker(storedTasks(f)));
 });

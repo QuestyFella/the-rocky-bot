@@ -12,6 +12,7 @@ const TaskStorage = require('../taskStorage');
 const board = require('../commands/board');
 const { getTaskTag } = require('../utils/taskTags');
 const { isBlocked } = require('../utils/taskDependencies');
+const { prepareDeletion, commitDeletion } = require('../utils/taskDeletion');
 test.after(() => fs.rmSync(temporaryDir, { recursive: true, force: true }));
 let counter = 0;
 
@@ -112,6 +113,33 @@ function fakeChannel(f) {
 }
 
 const config = f => JSON.parse(fs.readFileSync(path.join(temporaryDir, 'kanbanBoards.json')))[f.guild.id];
+
+test('confirmed tag deletion refreshes the board once, removes its messages, and preserves remaining group links', async () => {
+    const f = fixture(30);
+    f.tasks.forEach((task, i) => { task.title = `[${i < 10 ? 'POWER' : i < 20 ? 'TEST' : 'OTHER'}] Task ${i}`; });
+    f.client.taskStorage.saveTasks(f.guild.id, f.tasks);
+    const network = fakeChannel(f);
+    await board.execute(network.actor, ['setup']);
+    const before = config(f);
+    const root = before.messageId;
+    const powerId = getTaskTag(f.tasks[0]).id;
+    const testId = getTaskTag(f.tasks[10]).id;
+    const testMessage = before.sectionMessageIds[`tag:${testId}:0`];
+    let updates = 0, pending;
+    f.client.taskStorage.setUpdateListener(() => { updates++; pending = board.updateBoard(f.client, f.guild.id); return pending; });
+    const draft = prepareDeletion(network.actor, { tagId: powerId }).draft;
+    assert.equal(updates, 0);
+    assert.equal(commitDeletion(network.actor, draft.id).deleted, 10);
+    await pending;
+    assert.equal(updates, 1);
+    const after = config(f);
+    assert.equal(after.messageId, root);
+    assert.equal(after.sectionMessageIds[`tag:${testId}:0`], testMessage);
+    assert.ok(!after.sectionMessageIds[`tag:${powerId}:0`]);
+    assert.ok(network.deleted.includes(before.sectionMessageIds[`tag:${powerId}:0`]));
+    assert.ok(network.messages.has(testMessage));
+    validate([...network.messages.values()].map(message => message.payload), f.tasks.slice(10));
+});
 
 test('live setup creates all parts, adds navigation links, and tracks their IDs for updates and restart', async () => {
     const f = fixture();

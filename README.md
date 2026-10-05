@@ -36,7 +36,17 @@ Run `!task` (or ask a server manager to run `!task setup` once for a live board)
 5. Click **Team Tasks**, choose a group, and see its active tasks, including tasks claimed by teammates.
 6. Click **Edit Task** in a task's details to change its title, description, priority, due date, or prerequisites. The form is prefilled; leaving description, due date, or prerequisites blank clears it. The creator, assignee, and server managers can edit unlocked tasks, as can members of an explicitly assigned role.
 
-The shared board shows Add Task, Available Tasks, My Tasks, Team Tasks, and More. **More** opens a private menu: everyone sees Browse Tasks and Add Task; members with **Administrator** or **Manage Server** permission also see Import Tasks, Setup Teams, Refresh Board, and Blocked Tasks. Task controls appear only when you can use them. Permissions are checked again when you click or save, including on older messages.
+The shared board shows Add Task, Available Tasks, My Tasks, Team Tasks, and More. **More** opens a private menu: everyone sees Browse Tasks and Add Task; members with **Administrator** or **Manage Server** permission also see Import Tasks, Setup Teams, Refresh Board, Blocked Tasks, and Delete Tag Tasks. Task controls appear only when you can use them. Permissions are checked again when you click or save, including on older messages.
+
+### Deleting tasks
+
+Open a task and click **Delete Task**, review the private preview, then confirm or cancel. This follows the same permissions as Edit Task. Blocked tasks remain accessible only to server managers.
+
+For bulk deletion, a server manager opens **More → Delete Tag Tasks**, chooses a `[TAG]` from task titles, then reviews and confirms the exact tasks to remove. This includes all teams and statuses, including completed and blocked tasks. **General** covers untagged tasks and tasks with a `[GENERAL]` prefix. Both the tag picker and preview have Previous/Next buttons for long lists.
+
+Deletion is permanent. Previews expire after 15 minutes or a bot restart. If a selected task is edited, claimed, moved, or completed, or the tag gains or loses tasks, open a new preview before deleting. Permissions are checked again at confirmation. Bulk deletion saves the whole batch together and refreshes the live board automatically. Other tasks retain their prerequisites: a deleted direct prerequisite or an empty prerequisite tag keeps unfinished work blocked until a manager updates its prerequisites. The existing `!task delete KEY` text command still deletes a single task immediately.
+
+### Board layout
 
 The live board groups tasks by the **[TAG]** at the start of their title, such as `[POWER] Check the battery pack` or `[STM32] Pin map`. Tags ignore case and extra spaces. Tasks without a tag appear under **General**. Tags describe the work; the separate **Team** label still shows which group it is meant for.
 
