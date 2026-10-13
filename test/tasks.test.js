@@ -33,6 +33,8 @@ function validateMessage(payload) {
     assert.ok((payload.content || '').length <= 2000);
     const rows = json(payload);
     assert.ok(rows.length <= 5);
+    const ids = rows.flatMap(row => row.components).map(c => c.custom_id);
+    assert.equal(new Set(ids).size, ids.length, `duplicate custom IDs: ${ids}`);
     let chars = 0;
     for (const builder of payload.embeds || []) {
         const embed = builder.toJSON ? builder.toJSON() : builder;
@@ -112,6 +114,19 @@ test('a member can find, claim, finish, and reopen a task with buttons', async (
     await interact(f, 'kanban:unclaim:task-1');
     assert.equal(f.task().userId, null);
     assert.equal(getTaskStatus(f.task()), 'todo');
+});
+
+test('Find Work pages through every open task without duplicate button IDs', async () => {
+    const f = fixture();
+    const extra = Array.from({ length: 72 }, (_, i) => ({ id: `t${i}`, issueKey: `RC-${i + 2}`, title: `Task ${i}`, status: 'todo', createdAt: `2026-10-02T00:00:${String(i % 60).padStart(2, '0')}Z` }));
+    f.client.taskStorage.saveTasks(f.guild.id, [f.task(), ...extra]);
+    const seen = new Set();
+    for (const customId of ['kanban:find:0', 'kanban:find:1:page', 'kanban:find:2:page']) {
+        const { payload } = await interact(f, customId);
+        for (const option of json(payload)[0].components[0].options) seen.add(option.value);
+    }
+    assert.equal(seen.size, 73);
+    assert.match((await interact(f, 'kanban:find:1:page')).payload.content, /page 2\/3/);
 });
 
 test('a claimed task cannot be taken or changed by someone else; managers can', async () => {

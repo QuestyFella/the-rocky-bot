@@ -43,8 +43,9 @@ function buildTaskPicker(allTasks, list, requestedPage, actor) {
     }
     if (pageCount > 1) {
         components.push(new ActionRowBuilder().addComponents(
-            button(`kanban:${list}:${page - 1}`, 'Previous').setDisabled(page === 0),
-            button(`kanban:${list}:${page + 1}`, 'Next').setDisabled(page === pageCount - 1)
+            // The trailing ":page" keeps these IDs distinct from the Find Work / My Tasks buttons below.
+            button(`kanban:${list}:${page - 1}:page`, 'Previous').setDisabled(page === 0),
+            button(`kanban:${list}:${page + 1}:page`, 'Next').setDisabled(page === pageCount - 1)
         ));
     }
     components.push(...buildBoardComponents());
