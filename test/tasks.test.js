@@ -116,6 +116,20 @@ test('a member can find, claim, finish, and reopen a task with buttons', async (
     assert.equal(getTaskStatus(f.task()), 'todo');
 });
 
+test('Find Work options show the due date and the start of the plain-language summary', async () => {
+    const f = fixture({ task: { dueDate: '2026-11-01', description: 'Start the code for the BMP280 pressure sensor, which tells us altitude: set up the driver and check the chip answers with the right ID.\n\nDetails: Chip ID 0x58.' } });
+    const option = json((await interact(f, 'kanban:find:0')).payload)[0].components[0].options[0];
+    assert.match(option.description, /^due 1 Nov 2026 · Start the code for the BMP280 pressure sensor/);
+    assert.match(option.description, /…$/);
+    assert.ok(option.description.length <= 100);
+    assert.doesNotMatch(option.description, /Details|0x58/);
+    await interact(f, 'kanban:claim:task-1');
+    const mine = json((await interact(f, 'kanban:mine:0')).payload)[0].components[0].options[0];
+    assert.match(mine.description, /^In Progress · due 1 Nov 2026 · Start the code/);
+    const bare = fixture({ task: { description: '' } });
+    assert.equal(json((await interact(bare, 'kanban:find:0')).payload)[0].components[0].options[0].description, 'To Do');
+});
+
 test('Find Work pages through every open task without duplicate button IDs', async () => {
     const f = fixture();
     const extra = Array.from({ length: 72 }, (_, i) => ({ id: `t${i}`, issueKey: `RC-${i + 2}`, title: `Task ${i}`, status: 'todo', createdAt: `2026-10-02T00:00:${String(i % 60).padStart(2, '0')}Z` }));

@@ -6,6 +6,27 @@ const { getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, getBlo
 
 const pageSize = 25;
 const short = (text, length) => String(text || '').slice(0, length);
+
+// Fits text into a dropdown line, cutting at a word and marking the cut with an ellipsis.
+function clip(text, length) {
+    const value = String(text || '').replace(/\s+/g, ' ').trim();
+    if (value.length <= length) return value;
+    const cut = value.slice(0, length - 1);
+    return `${cut.slice(0, cut.lastIndexOf(' ') > length / 2 ? cut.lastIndexOf(' ') : cut.length).replace(/[\s.,;:—-]+$/, '')}…`;
+}
+
+// The first paragraph of a description is its plain-language summary; details follow a blank line.
+function summary(task) {
+    return String(task.description || '').split(/\n\s*\n/)[0];
+}
+
+// Dropdown line under each task: its status (in My Tasks), due date, then the start of its summary.
+function optionLine(task, list) {
+    const facts = [list === 'mine' ? getColumn(task).name : null, formatDue(task)].filter(Boolean).join(' · ');
+    const room = 100 - (facts ? facts.length + 3 : 0);
+    const text = summary(task) && room > 20 ? clip(summary(task), room) : '';
+    return [facts, text].filter(Boolean).join(' · ') || getColumn(task).name;
+}
 const button = (id, label, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
 const lists = {
     find: { label: 'Find Work', empty: 'Nothing is open right now. Click **Add Task** to create a task.', hint: 'Choose a task to see its details and claim it.' },
@@ -38,7 +59,7 @@ function buildTaskPicker(allTasks, list, requestedPage, actor) {
             .addOptions(visible.map(task => ({
                 label: short(`${getIssueKey(task)}: ${task.title}`, 100),
                 value: String(task.id),
-                description: short([getColumn(task).name, formatDue(task)].filter(Boolean).join(' · '), 100)
+                description: optionLine(task, list)
             })))));
     }
     if (pageCount > 1) {
