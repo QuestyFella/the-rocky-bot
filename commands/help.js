@@ -34,7 +34,7 @@ module.exports = {
                         '`!task assign KEY @user|none` - Assign a task',
                         '`!task refresh` - Redraw the live board',
                         '`!task setchannel add|remove|list #channel` - Limit where the bot answers',
-                        '`!task role all @Role [remove]` / `!task verify setup #channel @Role`'
+                        '`!task role all @Role [remove]` - Add or remove a role for everyone'
                     ].join('\n')
                 }
             );

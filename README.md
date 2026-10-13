@@ -32,7 +32,6 @@ Managers:
 - `!task import` - Attach a `.txt`/`.md` list or paste it after the command, then confirm the preview. Each task starts with `Title:`, optionally followed by `Description:` (can span lines) and `Due date: YYYY-MM-DD`. Numbering, headings, and the old `Priority:`/`Team:` lines are ignored. Titles already on the board are skipped. Up to 250 tasks per import.
 - `!task setchannel [add|remove|list] [#channel]` - Limit the channels where the bot responds
 - `!task role all @Role [remove]` - Add or remove a role for everyone (Manage Roles)
-- `!task verify setup #channel @Role` / `status` / `off` - Emoji verification for new members
 
 Aliases: `start` = claim, `close` = done, `release` = unclaim, `view` = details, `rename` = edit, `remove` = delete, and `board`/`list`/`kanban`/`jira` = show.
 
@@ -46,7 +45,7 @@ Aliases: `start` = claim, `close` = done, `release` = unclaim, `view` = details,
    ```
    DISCORD_TOKEN=your_bot_token_here
    ```
-6. Enable the **Message Content** and **Server Members** privileged intents in the Developer Portal. Invite the bot with View Channels, Send Messages, Embed Links, and Read Message History permissions. Role and verification commands also need Manage Roles; verification cleanup needs Manage Messages.
+6. Enable the **Message Content** and **Server Members** privileged intents in the Developer Portal. Invite the bot with View Channels, Send Messages, Embed Links, and Read Message History permissions. The role command also needs Manage Roles.
 7. Run the bot: `npm start`
 8. Use `!task setchannel #your-task-channel` to restrict the bot to a specific channel (admin only)
 9. Use `!task setup` in a project channel to create the live task board
