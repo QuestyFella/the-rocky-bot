@@ -27,6 +27,9 @@ function fixture({ task = {} } = {}) {
 }
 
 const json = payload => (payload.components || []).map(row => row.toJSON ? row.toJSON() : row);
+// Every title, description, and field of a board's cards, as one string.
+const boardText = payloads => [].concat(payloads).flatMap(p => p.embeds.map(e => e.toJSON()))
+    .map(e => [e.title, e.description, ...(e.fields || []).flatMap(f => [f.name, f.value])].filter(Boolean).join('\n')).join('\n');
 const labels = payload => json(payload).flatMap(row => row.components).map(c => c.label).filter(Boolean);
 
 function validateMessage(payload) {
@@ -39,8 +42,10 @@ function validateMessage(payload) {
     for (const builder of payload.embeds || []) {
         const embed = builder.toJSON ? builder.toJSON() : builder;
         assert.ok((embed.title || '').length <= 256 && (embed.description || '').length <= 4096);
+        assert.ok((embed.fields || []).length <= 25 && (embed.fields || []).every(f => f.name.length <= 256 && f.value && f.value.length <= 1024));
         chars += (embed.title || '').length + (embed.description || '').length + (embed.fields || []).reduce((n, f) => n + f.name.length + f.value.length, 0);
     }
+    assert.ok((payload.embeds || []).length <= 10);
     assert.ok(chars <= 6000);
     for (const option of rows.flatMap(row => row.components).flatMap(c => c.options || [])) assert.ok(option.label.length <= 100);
 }
@@ -79,10 +84,12 @@ test('the shared board has three buttons and lists open work grouped by tag', ()
     ];
     const [payload, ...rest] = renderBoard(tasks, 'Board');
     assert.equal(rest.length, 0);
-    const text = payload.embeds[0].toJSON().description;
-    assert.match(text, /To Do: \*\*1\*\* · 🔧 In Progress: \*\*2\*\* · ✅ Done: \*\*1\*\*/);
-    assert.match(text, /__POWER__\n`RC-1` Battery/);
-    assert.match(text, /`RC-2` \[STM32\] Pin map — <@alice>/);
+    const text = boardText(payload);
+    assert.match(text, /📥 \*\*1\*\* ready to claim  ·  🔧 \*\*2\*\* in progress  ·  ✅ \*\*1\*\* done/);
+    const cards = payload.embeds.map(e => e.toJSON());
+    assert.deepEqual(cards.map(c => c.title), ['🚀 Board', '🔧 In Progress', '⚡ POWER']);
+    assert.deepEqual(cards[2].fields.map(f => f.name), ['RC-1 · Battery']);
+    assert.match(text, /RC-2 · 📁 Pin map\n👤 <@alice>/);
     assert.doesNotMatch(text, /Shipped already/);
 });
 
@@ -91,8 +98,21 @@ test('large boards split across messages within Discord limits and keep every op
     const payloads = renderBoard(tasks, 'Board');
     assert.ok(payloads.length > 1);
     payloads.forEach(validateMessage);
-    const all = payloads.map(p => p.embeds[0].toJSON().description).join('\n');
-    for (let i = 0; i < 300; i++) assert.ok(all.includes(`\`RC-${i}\``));
+    const all = boardText(payloads);
+    for (let i = 0; i < 300; i++) assert.ok(all.includes(`RC-${i} ·`));
+    assert.deepEqual(payloads.map(p => p.components.length), [...payloads.slice(1).map(() => 0), 1], 'buttons only on the last message');
+});
+
+test('the task view shows its category, summary, and details, and the dropdown marks each category', async () => {
+    const f = fixture({ task: { description: 'Build the battery pack.\n\nDetails: 2S Li-ion, 5 A fuse.' } });
+    const option = json((await interact(f, 'kanban:find:0')).payload)[0].components[0].options[0];
+    assert.equal(option.emoji.name, '⚡');
+    const view = (await interact(f, 'kanban:select', { type: 'select', values: ['task-1'] })).payload.embeds[0].toJSON();
+    assert.equal(view.author.name, '⚡ POWER');
+    assert.equal(view.title, 'RC-1 · Check battery');
+    assert.equal(view.description, 'Build the battery pack.\n\n**Details:** 2S Li-ion, 5 A fuse.');
+    const card = renderBoard(f.client.taskStorage.getAllTasks(f.guild.id), 'Board')[0].embeds[1].toJSON();
+    assert.deepEqual(card.fields[0], { name: 'RC-1 · Check battery', value: 'Build the battery pack.' });
 });
 
 test('a member can find, claim, finish, and reopen a task with buttons', async () => {
@@ -246,7 +266,7 @@ test('the live board edits its messages, adds parts as it grows, and removes ext
     f.client.taskStorage.saveTasks(f.guild.id, [f.task()]);
     await board.updateBoard(f.client, f.guild.id);
     assert.deepEqual([...sent.keys()], ['m1']);
-    assert.match(sent.get('m1').payload.embeds[0].toJSON().description, /Check battery/);
+    assert.match(boardText(sent.get('m1').payload), /Check battery/);
 });
 
 test('blocked tasks stay hidden until same-category blockers are done; other categories never block', async () => {
@@ -257,9 +277,9 @@ test('blocked tasks stay hidden until same-category blockers are done; other cat
         { ...base, id: 'b', issueKey: 'RC-2', title: '[POWER] Regulator test', blockedBy: ['task-1'] },
         { ...base, id: 'c', issueKey: 'RC-3', title: '[RADIO] Driver', blockedBy: ['task-1'] }
     ]);
-    const text = () => board.generateBoardMessages(f.client, f.guild.id)[0].embeds[0].toJSON().description;
+    const text = () => boardText(board.generateBoardMessages(f.client, f.guild.id));
     assert.doesNotMatch(text(), /Regulator test/);
-    assert.match(text(), /__POWER__ · 🔒 1 more unlock as these finish/);
+    assert.match(text(), /⚡ POWER\n\*\*1\*\* ready to claim  ·  🔒 1 more unlock as these finish/);
     assert.match(text(), /RC-3/, 'a blocker in another category is ignored');
     const options = async () => json((await interact(f, 'kanban:find:0')).payload)[0].components[0].options.map(o => o.value);
     assert.deepEqual((await options()).sort(), ['c', 'task-1']);
@@ -282,8 +302,8 @@ test('the exec board keeps its tasks separate from the main board', async () => 
     await board.execute(message('exec-channel'), ['add', '[LEGAL]', 'Request', 'NOTAM']);
     const execTask = f.client.taskStorage.getAllTasks(f.guild.id).find(task => task.title === '[LEGAL] Request NOTAM');
     assert.equal(execTask.board, 'exec');
-    assert.doesNotMatch(board.generateBoardMessages(f.client, f.guild.id).map(p => p.embeds[0].toJSON().description).join(), /NOTAM/);
-    assert.match(board.generateBoardMessages(f.client, f.guild.id, 'exec')[0].embeds[0].toJSON().description, /NOTAM/);
+    assert.doesNotMatch(boardText(board.generateBoardMessages(f.client, f.guild.id)), /NOTAM/);
+    assert.match(boardText(board.generateBoardMessages(f.client, f.guild.id, 'exec')), /NOTAM/);
     await board.execute(message('main-channel', 'carol'), ['claim', execTask.id]);
     assert.match(replies.at(-1), /could not find/);
     const fromMain = await interact(f, `kanban:claim:${execTask.id}`);

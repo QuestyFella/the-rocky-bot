@@ -4,7 +4,7 @@ A Discord bot for a simple shared task board. Members find a task, claim it, and
 
 ## How it works
 
-A manager runs `!task setup` once. The bot posts a live board that updates by itself. It lists **In Progress** work with its owner, and **To Do** work grouped by the `[TAG]` at the start of each title. Done tasks are counted but not listed.
+A manager runs `!task setup` once. The bot posts a live board that updates by itself. It shows a card for **In Progress** work, then one coloured card per `[TAG]` category (the tag at the start of each title). Each task shows its key, title, the first paragraph of its description, and its due date. Done tasks are counted but not listed. Keep the first paragraph of a description short and plain; put technical details after a blank line, and they show only when someone opens the task.
 
 Members need three buttons:
 
