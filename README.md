@@ -14,6 +14,8 @@ Members need three buttons:
 
 **Locked tasks.** A task can be blocked by other tasks in the same `[TAG]` category. It stays hidden from the board and Find Work, and can't be claimed, until those tasks are done. The board shows how many tasks are still locked in each category. Tasks in other categories never block it. Managers set blockers with `!task block KEY OTHER-1, OTHER-2` (or `none`).
 
+**Notice.** A manager can run `!task notice on` in a board's channel to put a short "How this board works" card at the top of that board, for new members. `!task notice off` removes it.
+
 **Exec board.** A manager runs `!task setup exec` in a private exec channel. Tasks added or imported there go on the exec board only. Each channel only sees, and can only change, its own board's tasks.
 
 The person working on a task, its creator, and server managers (Manage Server or Administrator) can mark it done, unclaim, reopen, edit, or delete it. Deleting asks for confirmation. Task views are private to the person who clicked.
@@ -33,6 +35,7 @@ Managers:
 - `!task setup` - Post the live board in the current channel
 - `!task setup exec` - Post the exec board in the current channel
 - `!task block KEY OTHER-1, OTHER-2|none` - Hide a task until the listed same-category tasks are done
+- `!task notice on|off` - Show or hide a "How this board works" card at the top of the board in this channel (each server and board has its own setting)
 - `!task refresh` - Redraw the live board
 - `!task assign KEY @user|none` - Assign a task to someone
 - `!task import` - Attach a `.txt`/`.md` list or paste it after the command, then confirm the preview. Each task starts with `Title:`, optionally followed by `Description:` (can span lines) and `Due date: YYYY-MM-DD`. Numbering, headings, and the old `Priority:`/`Team:` lines are ignored. Titles already on the board are skipped. Up to 250 tasks per import.

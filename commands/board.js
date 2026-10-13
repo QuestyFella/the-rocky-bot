@@ -71,7 +71,8 @@ function createIssue(actor, { title, description = '', dueDate = null }, board =
 function generateBoardMessages(client, guildId, board = 'main') {
     const guild = client.guilds.cache.get(guildId);
     const title = !guild ? 'Task Board' : board === 'exec' ? `${guild.name} Exec Board` : getBoardConfig(guild).config.title;
-    return renderBoard(boardTasks(client, guildId, board), title);
+    const notice = Boolean(boardSlot(loadBoardConfigs()[guildId] || {}, board).notice);
+    return renderBoard(boardTasks(client, guildId, board), title, { notice });
 }
 
 async function syncBoard(client, guildId, force) {
@@ -218,6 +219,20 @@ async function execute(message, args) {
         }
         await updateBoard(message.client, message.guild.id, { force: true });
         return message.reply('Board refreshed.');
+    }
+
+    if (subcommand === 'notice') {
+        if (!isManager(actor)) return message.reply('You need Manage Server permission for that.');
+        const choice = args[0]?.toLowerCase();
+        if (!['on', 'off'].includes(choice)) return message.reply('Usage: `!task notice on|off` in the board\'s channel. It shows or hides the "How this board works" card at the top.');
+        const { configs, config } = getBoardConfig(message.guild);
+        const slot = boardSlot(config, actor.board);
+        if (choice === 'on') slot.notice = true;
+        else delete slot.notice;
+        saveBoardConfigs(configs);
+        await updateBoard(message.client, message.guild.id, { force: true });
+        const which = actor.board === 'exec' ? 'exec board' : 'board';
+        return message.reply(choice === 'on' ? `The ${which} now starts with a "How this board works" notice.` : `The notice is off for the ${which}.`);
     }
 
     if (subcommand === 'add') {

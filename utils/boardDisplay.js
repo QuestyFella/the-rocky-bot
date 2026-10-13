@@ -5,6 +5,7 @@ const { buildBoardComponents } = require('./boardComponents');
 
 const blue = 0x0052cc;
 const orange = 0xfb8c00;
+const grey = 0x5865f2;
 // Discord allows 10 embeds and 6,000 embed characters per message, and 25 fields per embed.
 const embedsPerMessage = 10;
 const charsPerMessage = 5800;
@@ -38,26 +39,42 @@ function sectionCards({ title, description, color, fields }) {
     return cards;
 }
 
-// The board is a header card, an In Progress card, then one card per category with the tasks
-// people can claim now. Done tasks are only counted, and locked tasks only counted per category.
-function boardCards(tasks, title) {
+// An optional card at the top that explains the board to new members; managers turn it on with !task notice on.
+const noticeCard = {
+    title: '📌 How this board works',
+    description: [
+        '**1. Find something to do.** Click **Find Work** below. Use the category menu to see only your area, then pick a task to read what it involves.',
+        '**2. Claim it.** Click **Claim**. The task is yours and moves to 🔧 In Progress, so nobody else picks it up.',
+        '**3. Finish it.** Open **My Tasks** and click **Mark Done**. Can\'t finish it? Click **Unclaim** to hand it back.',
+        '',
+        '🔒 **Locked tasks:** some tasks wait for earlier ones in the same category. They appear here once those are done.',
+        '➕ **Spotted something missing?** Click **Add Task**. You can edit or delete tasks you created or claimed.',
+        '❓ Type `!task help` for all commands, or ask a manager.'
+    ].join('\n'),
+    color: grey,
+    fields: []
+};
+
+// The board is an optional notice, a header card, an In Progress card, then one card per category with the
+// tasks people can claim now. Done tasks are only counted, and locked tasks only counted per category.
+function boardCards(tasks, title, { notice = false } = {}) {
     const doing = sortBoardTasks(tasks.filter(task => getTaskStatus(task) === 'progress'));
     const todo = tasks.filter(task => getTaskStatus(task) === 'todo');
     const locked = todo.filter(task => isLocked(task, tasks)).length;
     const done = tasks.filter(task => getTaskStatus(task) === 'done').length;
     const counts = [`📥 **${todo.length - locked}** ready to claim`, `🔧 **${doing.length}** in progress`, locked ? `🔒 **${locked}** waiting` : null, `✅ **${done}** done`];
-    const cards = [{
+    const cards = notice ? [noticeCard] : [];
+    cards.push({
         title: `🚀 ${title}`.slice(0, 256),
         description: [
             counts.filter(Boolean).join('  ·  '),
-            '',
-            '**Want to help?** Click **Find Work**, pick a task, then **Claim** it.',
-            '**Finished?** Open **My Tasks** and click **Mark Done**.',
+            // The notice already explains how to use the board.
+            ...(notice ? [] : ['', '**Want to help?** Click **Find Work**, pick a task, then **Claim** it.', '**Finished?** Open **My Tasks** and click **Mark Done**.']),
             ...(!doing.length && !todo.length ? ['', 'No open tasks. Click **Add Task** to create one.'] : [])
         ].join('\n'),
         color: blue,
         fields: []
-    }];
+    });
     if (doing.length) cards.push(...sectionCards({ title: '🔧 In Progress', color: orange, fields: doing.map(task => taskField(task, { showTag: true })) }));
     for (const group of groupTasksByTag(todo)) {
         const open = sortBoardTasks(group.tasks.filter(task => !isLocked(task, tasks)));
@@ -72,9 +89,9 @@ function boardCards(tasks, title) {
     return cards;
 }
 
-function renderBoard(tasks, title) {
+function renderBoard(tasks, title, options) {
     const messages = [[]];
-    for (const card of boardCards(tasks, title)) {
+    for (const card of boardCards(tasks, title, options)) {
         const current = messages.at(-1);
         if (current.length && (current.length >= embedsPerMessage || current.reduce((n, c) => n + size(c), 0) + size(card) > charsPerMessage)) messages.push([card]);
         else current.push(card);
