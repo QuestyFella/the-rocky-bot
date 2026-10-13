@@ -49,7 +49,7 @@ const noticeCard = {
         '',
         '🔒 **Locked tasks:** some tasks wait for earlier ones in the same category. They appear here once those are done.',
         '➕ **Spotted something missing?** Click **Add Task**. You can edit or delete tasks you created or claimed.',
-        '❓ Type `!task help` for all commands, or ask a manager.'
+        '❓ Type `!task help` for all commands, or ask an exec.'
     ].join('\n'),
     color: grey,
     fields: []
