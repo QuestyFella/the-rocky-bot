@@ -71,7 +71,8 @@ function createIssue(actor, { title, description = '', dueDate = null }, board =
 function generateBoardMessages(client, guildId, board = 'main') {
     const guild = client.guilds.cache.get(guildId);
     const title = !guild ? 'Task Board' : board === 'exec' ? `${guild.name} Exec Board` : getBoardConfig(guild).config.title;
-    const notice = Boolean(boardSlot(loadBoardConfigs()[guildId] || {}, board).notice);
+    const slot = boardSlot(loadBoardConfigs()[guildId] || {}, board);
+    const notice = slot.notice ? slot.noticeText || true : false;
     return renderBoard(boardTasks(client, guildId, board), title, { notice });
 }
 
@@ -224,15 +225,32 @@ async function execute(message, args) {
     if (subcommand === 'notice') {
         if (!isManager(actor)) return message.reply('You need Manage Server permission for that.');
         const choice = args[0]?.toLowerCase();
-        if (!['on', 'off'].includes(choice)) return message.reply('Usage: `!task notice on|off` in the board\'s channel. It shows or hides the "How this board works" card at the top.');
         const { configs, config } = getBoardConfig(message.guild);
         const slot = boardSlot(config, actor.board);
-        if (choice === 'on') slot.notice = true;
-        else delete slot.notice;
+        const which = actor.board === 'exec' ? 'exec board' : 'board';
+        // Keep the line breaks of a server's own notice, which the argument split would lose.
+        const text = choice === 'set' ? message.content.replace(/^\s*!task\s+notice\s+set\b[ \t]*\n?/i, '').trim() : '';
+        if (choice === 'set' && (!text || text.length > 3000)) return message.reply('Write the notice after the command, up to 3,000 characters: `!task notice set Your text`. Start with a line like `# Welcome` to give it a title.');
+        if (!['on', 'off', 'set', 'default'].includes(choice)) {
+            return message.reply([
+                `The notice is **${slot.notice ? 'on' : 'off'}** for this ${which}${slot.noticeText ? ', using this server\'s own text' : ''}.`,
+                '`!task notice on` / `!task notice off` - Show or hide the notice at the top of this channel\'s board',
+                '`!task notice set Your text` - Use your own notice (a first line like `# Welcome` becomes its title)',
+                '`!task notice default` - Go back to the built-in "How this board works" notice'
+            ].join('\n'));
+        }
+        if (choice === 'off') delete slot.notice;
+        else slot.notice = true;
+        if (choice === 'set') slot.noticeText = text;
+        if (choice === 'default') delete slot.noticeText;
         saveBoardConfigs(configs);
         await updateBoard(message.client, message.guild.id, { force: true });
-        const which = actor.board === 'exec' ? 'exec board' : 'board';
-        return message.reply(choice === 'on' ? `The ${which} now starts with a "How this board works" notice.` : `The notice is off for the ${which}.`);
+        return message.reply({
+            on: `The ${which} now starts with ${slot.noticeText ? 'this server\'s notice' : 'the "How this board works" notice'}.`,
+            off: `The notice is off for the ${which}.`,
+            set: `Saved. The ${which} now starts with your notice.`,
+            default: `The ${which} now uses the built-in "How this board works" notice.`
+        }[choice]);
     }
 
     if (subcommand === 'add') {

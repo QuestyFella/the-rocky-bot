@@ -36,6 +36,7 @@ module.exports = {
                         '`!task import` - Attach a .txt list (`Title:`, `Description:`, `Due date:` lines) or paste it after the command',
                         '`!task assign KEY @user|none` - Assign a task',
                         '`!task notice on|off` - Show or hide a "How this board works" card at the top of this channel\'s board',
+                        '`!task notice set Your text` / `!task notice default` - Use your own notice text, or go back to the built-in one',
                         '`!task refresh` - Redraw the live board',
                         '`!task setchannel add|remove|list #channel` - Limit where the bot answers',
                         '`!task role all @Role [remove]` - Add or remove a role for everyone'
