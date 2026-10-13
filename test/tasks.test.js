@@ -315,3 +315,28 @@ test('the board plan script retags, moves, and blocks tasks, and rejects cross-c
     assert.match(applyPlan(tasks, [{ key: 'U-2', blockedBy: ['U-1'] }]).errors[0], /STM32, not BMP280/);
     assert.match(applyPlan(tasks, [{ key: 'U-1', title: '[A] x', blockedBy: ['U-2'] }, { key: 'U-2', title: '[A] y', blockedBy: ['U-1'] }]).errors.join(), /loop/);
 });
+
+test('the board plan script adds, deletes, dates, and describes tasks, and catches out-of-order dates', () => {
+    const { applyPlan } = require('../scripts/apply-board-plan');
+    const tasks = [
+        { id: '1', issueKey: 'U-1', title: 'test' },
+        { id: '2', issueKey: 'U-2', title: '[A] First', description: 'Old.' },
+        { id: '3', issueKey: 'U-3', title: '[A] Second', blockedBy: ['1'] }
+    ];
+    const result = applyPlan(tasks, [
+        { key: 'U-1', delete: true },
+        { key: 'U-2', dueDate: '2026-11-01', description: 'Old. New.' },
+        { new: 'third', title: '[A] Third', dueDate: '2026-11-08', blockedBy: ['U-2'] },
+        { key: 'U-3', blockedBy: ['third'], dueDate: null }
+    ], { projectKey: 'U', nextIssueNumber: 4, now: '2026-10-13T00:00:00Z' });
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(result.tasks.map(task => task.issueKey), ['U-2', 'U-3', 'U-4']);
+    assert.equal(result.nextIssueNumber, 5);
+    const third = result.tasks.find(task => task.issueKey === 'U-4');
+    assert.deepEqual(third.blockedBy, ['2']);
+    assert.deepEqual(result.tasks.find(task => task.issueKey === 'U-3').blockedBy, [third.id]);
+    assert.equal(result.tasks[0].description, 'Old. New.');
+    assert.equal(result.tasks[1].dueDate, null);
+    assert.match(applyPlan(tasks, [{ key: 'U-3', title: '[A] Second', dueDate: '2026-10-01', blockedBy: ['U-2'] }, { key: 'U-2', dueDate: '2026-11-01' }]).errors[0], /before its blocker U-2/);
+    assert.match(applyPlan(tasks, [{ key: 'U-2', delete: true }, { key: 'U-3', blockedBy: ['U-2'] }]).errors[0], /being deleted/);
+});
