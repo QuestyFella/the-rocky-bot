@@ -13,7 +13,8 @@ module.exports = {
                 '2. Click **Claim**. It is now yours and In Progress.',
                 '3. When finished, open **My Tasks** and click **Mark Done**.',
                 '',
-                'Anyone can click **Add Task**. Start a title with a tag like `[POWER]` to group related work.'
+                'Anyone can click **Add Task**. Start a title with a tag like `[POWER]` to group related work.',
+                'Some tasks are 🔒 locked: they appear once the tasks before them in the same category are done.'
             ].join('\n'))
             .addFields(
                 {
@@ -30,6 +31,8 @@ module.exports = {
                     name: 'Managers',
                     value: [
                         '`!task setup` - Post the live board in this channel',
+                        '`!task setup exec` - Post the exec board here (its tasks stay off the main board)',
+                        '`!task block KEY OTHER-1, OTHER-2|none` - Hide a task until same-category tasks are done',
                         '`!task import` - Attach a .txt list (`Title:`, `Description:`, `Due date:` lines) or paste it after the command',
                         '`!task assign KEY @user|none` - Assign a task',
                         '`!task refresh` - Redraw the live board',

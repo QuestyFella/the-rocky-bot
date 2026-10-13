@@ -4,7 +4,8 @@ const { randomUUID } = require('crypto');
 const { dataPath } = require('../utils/dataPaths');
 const { renderBoard } = require('../utils/boardDisplay');
 const { buildTaskView, buildTaskPicker } = require('../utils/boardComponents');
-const { getIssueKey, parseDueDate, isManager, canChange, claimError, setTaskStatus } = require('../utils/kanban');
+const { getIssueKey, getTaskBoard, parseDueDate, isManager, canChange, claimError, setTaskStatus } = require('../utils/kanban');
+const { getTaskTag } = require('../utils/taskTags');
 
 const boardConfigFile = dataPath('kanbanBoards.json');
 const legacyBoardConfigFile = dataPath('jiraBoards.json');
@@ -40,31 +41,52 @@ function getBoardConfig(guild) {
     return { configs, config };
 }
 
-function createIssue(actor, { title, description = '', dueDate = null }) {
+// The main board keeps its message IDs at the top level of the config (as before);
+// other boards, such as the exec board, live under config.boards.
+const boardNames = ['main', 'exec'];
+function boardSlot(config, board) {
+    return board === 'main' ? config : ((config.boards ||= {})[board] ||= {});
+}
+
+function boardForChannel(guildId, channelId) {
+    return channelId && loadBoardConfigs()[guildId]?.boards?.exec?.channelId === channelId ? 'exec' : 'main';
+}
+
+function boardTasks(client, guildId, board) {
+    return client.taskStorage.getAllTasks(guildId).filter(task => getTaskBoard(task) === board);
+}
+
+function createIssue(actor, { title, description = '', dueDate = null }, board = actor.board || 'main') {
     const { configs, config } = getBoardConfig(actor.guild);
     const issueKey = `${config.projectKey}-${config.nextIssueNumber++}`;
     saveBoardConfigs(configs);
     const now = new Date().toISOString();
     return {
         id: randomUUID(), issueKey, title, description, dueDate, status: 'todo', completed: false,
-        createdAt: now, updatedAt: now, userId: null, createdBy: actor.author.id, guildId: actor.guild.id
+        createdAt: now, updatedAt: now, userId: null, createdBy: actor.author.id, guildId: actor.guild.id,
+        ...(board === 'main' ? {} : { board })
     };
 }
 
-function generateBoardMessages(client, guildId) {
+function generateBoardMessages(client, guildId, board = 'main') {
     const guild = client.guilds.cache.get(guildId);
-    const title = guild ? getBoardConfig(guild).config.title : 'Task Board';
-    return renderBoard(client.taskStorage.getAllTasks(guildId), title);
+    const title = !guild ? 'Task Board' : board === 'exec' ? `${guild.name} Exec Board` : getBoardConfig(guild).config.title;
+    return renderBoard(boardTasks(client, guildId, board), title);
 }
 
 async function syncBoard(client, guildId, force) {
+    for (const board of boardNames) await syncOneBoard(client, guildId, board, force);
+}
+
+async function syncOneBoard(client, guildId, board, force) {
     const configs = loadBoardConfigs();
-    const config = configs[guildId];
-    if (!config?.channelId || !config.messageId) return;
+    if (!configs[guildId]) return;
+    const config = boardSlot(configs[guildId], board);
+    if (!config.channelId || !config.messageId) return;
     try {
         const channel = await client.channels.fetch(config.channelId);
         if (!channel) return;
-        const payloads = generateBoardMessages(client, guildId);
+        const payloads = generateBoardMessages(client, guildId, board);
         const ids = [...new Set(config.messageIds?.length ? config.messageIds : [config.messageId])];
         const save = () => {
             config.messageId = ids[0];
@@ -100,7 +122,7 @@ async function syncBoard(client, guildId, force) {
         }
         if (JSON.stringify(config.messageIds) !== JSON.stringify(ids) || config.sectionMessageIds) save();
     } catch (error) {
-        console.error(`Failed to update task board for guild ${guildId}:`, error);
+        console.error(`Failed to update the ${board} task board for guild ${guildId}:`, error);
     }
 }
 
@@ -112,21 +134,40 @@ function updateBoard(client, guildId, { force = false } = {}) {
     return update;
 }
 
-function findTask(message, identifier) {
+// Each channel only sees the tasks of its own board.
+function findTask(actor, identifier) {
     const lookup = String(identifier || '').trim().toUpperCase();
-    const tasks = message.client.taskStorage.getAllTasks(message.guild.id);
-    return lookup ? tasks.find(task => getIssueKey(task).toUpperCase() === lookup || String(task.id).toUpperCase() === lookup) || null : null;
+    return lookup ? boardTasks(actor.client, actor.guild.id, actor.board).find(task => getIssueKey(task).toUpperCase() === lookup || String(task.id).toUpperCase() === lookup) || null : null;
 }
 
 function actorFor(message) {
-    return { client: message.client, guild: message.guild, member: message.member, author: message.author };
+    return { client: message.client, guild: message.guild, member: message.member, author: message.author, board: boardForChannel(message.guild.id, message.channel.id) };
+}
+
+// Sets which same-category tasks must be done before this one becomes visible.
+function setBlockers(actor, task, input) {
+    if (/^(none|clear)$/i.test(input.trim())) return { blockedBy: [] };
+    const tasks = boardTasks(actor.client, actor.guild.id, actor.board);
+    const blockedBy = [];
+    for (const key of input.split(/[\s,]+/).filter(Boolean)) {
+        const other = tasks.find(item => getIssueKey(item).toUpperCase() === key.toUpperCase());
+        if (!other) return { error: `I could not find ${key} on this board.` };
+        if (other.id === task.id) return { error: 'A task cannot block itself.' };
+        if (getTaskTag(other).id !== getTaskTag(task).id) return { error: `${key} is in ${getTaskTag(other).name}, not ${getTaskTag(task).name}. Only tasks in the same category can block each other.` };
+        if (!blockedBy.includes(other.id)) blockedBy.push(other.id);
+    }
+    // Refuse loops, which would hide every task in them forever.
+    const byId = new Map(tasks.map(item => [item.id, item.id === task.id ? { ...item, blockedBy } : item]));
+    const visit = (id, path) => path.has(id) || [...(byId.get(id)?.blockedBy || [])].some(next => visit(next, new Set([...path, id])));
+    if (blockedBy.some(id => visit(id, new Set([task.id])))) return { error: 'That would create a loop of tasks blocking each other.' };
+    return { blockedBy };
 }
 
 // Each command maps to: what it needs, who may run it, and the change it makes.
 const taskCommands = {
     claim: {
         usage: '!task claim KEY',
-        check: (actor, task) => claimError(actor, task),
+        check: (actor, task, tasks) => claimError(actor, task, tasks),
         apply: (actor, task) => { task.userId = actor.author.id; setTaskStatus(task, 'progress'); return `${getIssueKey(task)} is yours and In Progress.`; }
     },
     done: {
@@ -155,21 +196,28 @@ async function execute(message, args) {
     const save = task => storage.updateTask(message.guild.id, task.id, task);
 
     if (subcommand === 'show') {
-        for (const payload of generateBoardMessages(message.client, message.guild.id)) await message.channel.send(payload);
+        for (const payload of generateBoardMessages(message.client, message.guild.id, actor.board)) await message.channel.send(payload);
         return;
     }
 
     if (subcommand === 'setup' || subcommand === 'refresh') {
         if (!isManager(actor)) return message.reply('You need Manage Server permission for that.');
         if (subcommand === 'setup') {
+            const board = args[0]?.toLowerCase() === 'exec' ? 'exec' : 'main';
             const { configs, config } = getBoardConfig(message.guild);
-            const sent = await message.channel.send(generateBoardMessages(message.client, message.guild.id)[0]);
-            Object.assign(config, { channelId: message.channel.id, messageId: sent.id, messageIds: [sent.id] });
+            const other = boardSlot(config, board === 'exec' ? 'main' : 'exec');
+            if (other.channelId === message.channel.id) return message.reply(`This channel already has the ${board === 'exec' ? 'main' : 'exec'} board. Use a different channel.`);
+            const sent = await message.channel.send(generateBoardMessages(message.client, message.guild.id, board)[0]);
+            Object.assign(boardSlot(config, board), { channelId: message.channel.id, messageId: sent.id, messageIds: [sent.id] });
             delete config.sectionMessageIds;
             saveBoardConfigs(configs);
+            await updateBoard(message.client, message.guild.id, { force: true });
+            return message.reply(board === 'exec'
+                ? 'Exec board created. Tasks added or imported in this channel go on this board only.'
+                : 'Live task board created. It updates by itself when tasks change.');
         }
         await updateBoard(message.client, message.guild.id, { force: true });
-        return message.reply(subcommand === 'setup' ? 'Live task board created. It updates by itself when tasks change.' : 'Board refreshed.');
+        return message.reply('Board refreshed.');
     }
 
     if (subcommand === 'add') {
@@ -181,17 +229,18 @@ async function execute(message, args) {
     }
 
     if (subcommand === 'mine' || subcommand === 'find') {
-        return message.channel.send(buildTaskPicker(storage.getAllTasks(message.guild.id), subcommand, 0, actor));
+        return message.channel.send(buildTaskPicker(boardTasks(message.client, message.guild.id, actor.board), subcommand, 0, actor));
     }
 
     const usage = taskCommands[subcommand]?.usage || {
         details: '!task details KEY', edit: '!task edit KEY New title', delete: '!task delete KEY',
-        due: '!task due KEY YYYY-MM-DD|none', assign: '!task assign KEY @user|none'
+        due: '!task due KEY YYYY-MM-DD|none', assign: '!task assign KEY @user|none',
+        block: '!task block KEY OTHER-1, OTHER-2|none'
     }[subcommand];
     if (!usage) return message.client.commands.get('help').execute(message);
-    const needsValue = ['edit', 'due', 'assign'].includes(subcommand);
+    const needsValue = ['edit', 'due', 'assign', 'block'].includes(subcommand);
     if (!args[0] || (needsValue && !args[1])) return message.reply(`Usage: \`${usage}\``);
-    const task = findTask(message, args[0]);
+    const task = findTask(actor, args[0]);
     if (!task) return message.reply('I could not find that task. Use its key, such as `QSS-12`.');
     const value = args.slice(1).join(' ').trim();
 
@@ -199,7 +248,7 @@ async function execute(message, args) {
 
     if (taskCommands[subcommand]) {
         const { check, apply } = taskCommands[subcommand];
-        const error = check(actor, task);
+        const error = check(actor, task, boardTasks(message.client, message.guild.id, actor.board));
         if (error) return message.reply(error);
         const reply = apply(actor, task);
         return message.reply(save(task) ? reply : 'Failed to save the task.');
@@ -212,6 +261,15 @@ async function execute(message, args) {
         task.userId = user?.id || null;
         setTaskStatus(task, user ? 'progress' : 'todo');
         return message.reply(save(task) ? `${getIssueKey(task)} ${user ? `assigned to ${user}` : 'unassigned'}.` : 'Failed to save the task.');
+    }
+
+    if (subcommand === 'block') {
+        if (!isManager(actor)) return message.reply('Only managers can set which tasks block others.');
+        const { blockedBy, error } = setBlockers(actor, task, value);
+        if (error) return message.reply(error);
+        task.blockedBy = blockedBy;
+        task.updatedAt = new Date().toISOString();
+        return message.reply(save(task) ? (blockedBy.length ? `${getIssueKey(task)} stays hidden until its blockers are done.` : `${getIssueKey(task)} is no longer blocked.`) : 'Failed to save the task.');
     }
 
     if (!canChange(actor, task)) return message.reply('Only the person working on this task, its creator, or a manager can change it.');
@@ -237,6 +295,8 @@ module.exports = {
     description: 'Run the task board',
     execute,
     createIssue,
+    boardForChannel,
+    boardTasks,
     generateBoardMessages,
     updateBoard,
     taskCommands
