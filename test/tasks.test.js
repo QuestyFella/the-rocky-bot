@@ -20,7 +20,7 @@ let sequence = 0;
 
 function fixture({ task = {} } = {}) {
     const guild = { id: `guild-${++sequence}`, name: 'Rocket Club', roles: { cache: new Collection() } };
-    const client = { taskStorage: new TaskStorage(path.join(temporaryDir, guild.id)), serverConfigs: {}, guilds: { cache: new Collection([[guild.id, guild]]) }, pendingVerifications: new Map() };
+    const client = { taskStorage: new TaskStorage(path.join(temporaryDir, guild.id)), serverConfigs: {}, guilds: { cache: new Collection([[guild.id, guild]]) } };
     const initial = { id: 'task-1', issueKey: 'RC-1', title: '[POWER] Check battery', description: 'Details', status: 'todo', completed: false, createdBy: 'bob', createdAt: '2026-10-01T00:00:00Z', userId: null, ...task };
     client.taskStorage.addTask(guild.id, initial);
     return { client, guild, initial, task: () => client.taskStorage.getAllTasks(guild.id).find(item => item.id === initial.id) };

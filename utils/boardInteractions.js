@@ -29,8 +29,8 @@ async function handleBoardInteraction(interaction) {
         await ephemeral('Task commands are disabled in this channel.');
         return true;
     }
-    if (interaction.member?.pending || interaction.client.pendingVerifications?.has(`${interaction.guildId}:${interaction.user.id}`)) {
-        await ephemeral('Finish verification before using the board.');
+    if (interaction.member?.pending) {
+        await ephemeral('Accept the server rules before using the board.');
         return true;
     }
 
