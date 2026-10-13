@@ -2,56 +2,43 @@ const { EmbedBuilder } = require('discord.js');
 
 module.exports = {
     name: 'help',
-    description: 'Show Kanban board commands',
+    description: 'Show task board help',
     execute(message) {
         const helpEmbed = new EmbedBuilder()
             .setColor(0x0052cc)
-            .setTitle('Kanban Board Commands')
-            .setDescription('Anyone can create tasks. Open `!task` and use the buttons. Choose **Available Tasks**, pick a task, then **Claim** or **Start Work**. **My Tasks** shows your work; **Team Tasks** lets you choose a group. Team labels stay visible after assignment. Use the task’s dropdowns to change its status or team.')
+            .setTitle('Task Board')
+            .setDescription([
+                '**Getting started takes three clicks:**',
+                '1. On the board, click **Find Work** and pick a task.',
+                '2. Click **Claim**. It is now yours and In Progress.',
+                '3. When finished, open **My Tasks** and click **Mark Done**.',
+                '',
+                'Anyone can click **Add Task**. Start a title with a tag like `[POWER]` to group related work.'
+            ].join('\n'))
             .addFields(
                 {
-                    name: 'Core Flow',
+                    name: 'Text commands',
                     value: [
-                        '`!task` - Show the board.',
-                        '`!task setup` - Create the live-updating board in this channel.',
-                        '`!task add [issue]` - Add an issue.',
-                        '**Import Tasks** / `!task import` - Paste a list or upload a .txt file; preview before saving.',
-                        '`!task available` / `!task mine` - Browse available tasks or your work.',
-                        '`!task teams` - Choose a team and browse its active tasks.',
-                        '`!task move [key] [todo|doing|review|done]` - Move an issue.',
-                        '`!task claim [key]` - Assign an issue to yourself.',
-                        '`!task start [key]` - Claim and move to In Progress.',
-                        '`!task release [key]` - Return your task to To Do.',
-                        '`!task done [key]` - Move an issue to Done.'
+                        '`!task` - Show the board',
+                        '`!task add [TAG] Title` - Add a task',
+                        '`!task claim KEY` / `!task done KEY` / `!task unclaim KEY` / `!task reopen KEY`',
+                        '`!task details KEY` - Show one task',
+                        '`!task edit KEY New title` / `!task due KEY 2026-12-01|none` / `!task delete KEY`'
                     ].join('\n')
                 },
                 {
-                    name: 'Issue Details',
+                    name: 'Managers',
                     value: [
-                        '`!task details [key]` - Show one issue.',
-                        '`!task assign [key] @user|@role|none` - Change assignee.',
-                        '`!task team [key] Team Name|none` - Set or clear the team tag.',
-                        '`!task priority [key] [low|medium|high|urgent]` - Set priority.',
-                        '`!task due [key] [date|none]` - Set or clear due date.',
-                        '`!task edit [key] [new title]` - Rename an issue.',
-                        '`!task delete [key]` - Delete an issue.'
-                    ].join('\n')
-                },
-                {
-                    name: 'Setup',
-                    value: [
-                        '`!task setchannel add #channel` - Restrict bot commands to a channel.',
-                        '**Setup Teams** button / `!task teams setup` - Enter group names (Manage Server).',
-                        '`!task setchannel list` - Show allowed channels.',
-                        '`!task role all @Role [remove]` - Mass add/remove a role; add skips pending members and bots.',
-                        '`!task verify setup #channel @Role` or IDs - New members type a random emoji to verify.',
-                        '`!task verify status` / `!task verify off` - Check or disable verification.',
-                        '`!task board`, `!task kanban`, and `!task jira` still work as aliases.'
+                        '`!task setup` - Post the live board in this channel',
+                        '`!task import` - Attach a .txt list (`Title:`, `Description:`, `Due date:` lines) or paste it after the command',
+                        '`!task assign KEY @user|none` - Assign a task',
+                        '`!task refresh` - Redraw the live board',
+                        '`!task setchannel add|remove|list #channel` - Limit where the bot answers',
+                        '`!task role all @Role [remove]` / `!task verify setup #channel @Role`'
                     ].join('\n')
                 }
-            )
-            .setTimestamp();
+            );
 
-        message.channel.send({ embeds: [helpEmbed] });
+        return message.channel.send({ embeds: [helpEmbed] });
     }
 };

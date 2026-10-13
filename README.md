@@ -1,188 +1,40 @@
-# Kanban Board Discord Bot
+# Task Board Discord Bot
 
-A Discord bot for running a lightweight project Kanban board directly in Discord.
+A Discord bot for a simple shared task board. Members find a task, claim it, and mark it done.
 
-## Features
+## How it works
 
-- Live-updating Kanban board using embeds
-- Every task appears on the board, grouped by title tags with an overview and linked messages
-- Soft prerequisites show readiness; a few manager-controlled hard gates hold Start Work and completion
-- Buttons, task pickers, and Add Task / Edit Task forms
-- Import a pasted list or text file, review a preview, then save the whole batch
-- Claim, Start Work, Release, and status changes without typing commands
-- Available Tasks and My Tasks views, with pagination for larger boards
-- Visible team labels that stay with tasks after assignment, plus a Team Tasks picker for any group
-- To Do, In Progress, Review, and Done columns
-- Short issue keys
-- Issue assignment to users or roles
-- Due dates and priorities
-- Detailed issue embeds
-- Optional channel restriction
-- Mass role assignment / removal (`!task role all @Role [remove]`)
-- Human verification on join — random emoji prompt that changes per person (stops bots)
-- Persistent JSON storage
-- Per-server board isolation, even when the same users are in multiple servers
+A manager runs `!task setup` once. The bot posts a live board that updates by itself. It lists **In Progress** work with its owner, and **To Do** work grouped by the `[TAG]` at the start of each title. Done tasks are counted but not listed.
+
+Members need three buttons:
+
+1. **Find Work**: pick an open task, then click **Claim**. The task becomes yours and moves to In Progress.
+2. **My Tasks**: pick your task, then click **Mark Done**, or **Unclaim** to hand it back.
+3. **Add Task**: a short form with a title, an optional description, and an optional due date. Start the title with a tag like `[POWER]` to group it.
+
+The person working on a task, its creator, and server managers (Manage Server or Administrator) can mark it done, unclaim, reopen, edit, or delete it. Deleting asks for confirmation. Task views are private to the person who clicked.
 
 ## Commands
 
-### Using the board
+- `!task` - Show the board
+- `!task add [TAG] Title` - Add a task
+- `!task claim KEY` - Take a task (moves it to In Progress)
+- `!task done KEY` / `!task unclaim KEY` / `!task reopen KEY`
+- `!task details KEY` - Show one task
+- `!task edit KEY New title` / `!task due KEY 2026-12-01|none` / `!task delete KEY`
+- `!task help` - Show help
 
-Run `!task` (or ask a server manager to run `!task setup` once for a live board).
+Managers:
 
-1. Anyone can click **Add Task** to enter a title, description, priority, optional due date, and team. New tasks are unassigned.
-2. Click **Ready Tasks**, choose a task, and click **Claim** to assign yourself. **Start Work** also moves it to In Progress.
-3. Click **My Tasks** to see your active work. Choose a task and use its status dropdown to move it to Review or Done.
-4. Click **Release** to return your task to To Do for someone else to claim.
-5. Click **Team Tasks**, choose a group, and see its active tasks, including tasks claimed by teammates.
-6. Click **Edit Task** in a task's details to change its title, description, priority, due date, or prerequisites. The form is prefilled; leaving description, due date, or prerequisites blank clears it. The creator, assignee, and server managers can edit tasks, as can members of an explicitly assigned role.
+- `!task setup` - Post the live board in the current channel
+- `!task refresh` - Redraw the live board
+- `!task assign KEY @user|none` - Assign a task to someone
+- `!task import` - Attach a `.txt`/`.md` list or paste it after the command, then confirm the preview. Each task starts with `Title:`, optionally followed by `Description:` (can span lines) and `Due date: YYYY-MM-DD`. Numbering, headings, and the old `Priority:`/`Team:` lines are ignored. Titles already on the board are skipped. Up to 250 tasks per import.
+- `!task setchannel [add|remove|list] [#channel]` - Limit the channels where the bot responds
+- `!task role all @Role [remove]` - Add or remove a role for everyone (Manage Roles)
+- `!task verify setup #channel @Role` / `status` / `off` - Emoji verification for new members
 
-The shared board shows Add Task, Ready Tasks, My Tasks, Team Tasks, and More. **More** opens a private menu: everyone sees Browse Tasks, Available Tasks, Waiting Tasks, and Add Task; members with **Administrator** or **Manage Server** permission also see Import Tasks, Setup Teams, Refresh Board, and Delete Tag Tasks. Task controls appear only when you can use them. Permissions are checked again when you click or save, including on older messages.
-
-### Deleting tasks
-
-Open a task and click **Delete Task**, review the private preview, then confirm or cancel. This follows the same permissions as Edit Task. Waiting tasks follow the same permissions as other tasks.
-
-For bulk deletion, a server manager opens **More → Delete Tag Tasks**, chooses a `[TAG]` from task titles, then reviews and confirms the exact tasks to remove. This includes all teams and statuses, including completed and waiting tasks. **General** covers untagged tasks and tasks with a `[GENERAL]` prefix. Both the tag picker and preview have Previous/Next buttons for long lists.
-
-Deletion is permanent. Previews expire after 15 minutes or a bot restart. If a selected task is edited, claimed, moved, or completed, or the tag gains or loses tasks, open a new preview before deleting. Permissions are checked again at confirmation. Bulk deletion saves the whole batch together and refreshes the live board automatically. Other tasks retain their prerequisites: a deleted direct prerequisite or an empty prerequisite tag shows Waiting; hard gates still hold Start Work and completion until a manager updates them. The existing `!task delete KEY` text command still deletes a single task immediately.
-
-### Board layout
-
-The live board groups tasks by the **[TAG]** at the start of their title, such as `[POWER] Check the battery pack` or `[STM32] Pin map`. Tags ignore case and extra spaces. Tasks without a tag appear under **General**. Tags describe the work; the separate **Team** label still shows which group it is meant for.
-
-With multiple tags, a short overview shows task counts, progress, and **View tasks** links to each group. Each group has its own message with the tag and team at the top, followed by task cards showing the full title, status, priority, due date, and owner. If a group contains different teams, each task shows its own team. **Open Tasks** opens a private task picker for that tag, including completed tasks. Add or change a `[TAG]` prefix through **Add Task** or **Edit Task** to move a task into a group.
-
-Large groups continue across linked messages so every task remains visible. Previous/Next group links and an Overview link connect them. Task changes update the affected messages; adding a group keeps existing group links, and a deleted message is recreated automatically. **Refresh Board** forces every message to refresh.
-
-Task pickers and task controls opened from the board are visible only to the person who clicked. Task pages show 10 entries with full titles, team, priority, status, and due date above the dropdown. Choose a task to read its full description and use its controls. Buttons continue working after a restart. Tasks assigned to a role can be claimed by members of that role; a task already claimed by someone else cannot be taken over with Claim. Edit forms expire after 15 minutes or a restart, and detect changes to task details made while the form was open. Assignment, status, and team changes made during an edit are preserved.
-
-### Readiness and prerequisites
-
-1. Open a task and click **Edit Task**.
-2. In **Waiting on**, enter task keys or whole tags separated by commas, such as `URC-12, [POWER]`. You can enter up to 20 references; each tag counts as one.
-3. Save. The task shows **Waiting on** until those prerequisites are Done. It stays visible, editable, and claimable. Soft links also allow Start Work, Review, and Done.
-
-**Ready Tasks** lists active work with ready tasks first and grey cards for waiting tasks. Waiting options remain enabled. **Ready Only** filters out waiting work; **Include Waiting** brings it back. **Available Tasks** shows unassigned claimable tasks, including waiting work. **Waiting Tasks** shows the unfinished tasks that have unmet prerequisites. These views are available to all members. Discord does not support custom text colours in dropdown options, so waiting cards use a grey embed colour and a Waiting label.
-
-Keep hard gates for a few meaningful milestones. Server managers can prefix a reference with **!**, such as `!URC-12, ![POWER], URC-3`. The first two hold Start Work, Review, and Done; the last is a soft reminder. Claims stay allowed. Members can edit soft links while preserving existing hard gates; only managers can add, change, or remove hard gates. Text commands enforce the same rules: `!task depends KEY OTHER-1, !OTHER-2, [POWER]`. Use `none` to clear references when permitted.
-
-A tag reference follows **every current task in that tag**, including tasks added later. Names ignore case and extra spaces. Finishing, reopening, adding, deleting, or moving a task updates readiness automatically. An empty or missing tag shows Waiting. Missing hard prerequisites continue to gate work. Completed tasks keep their history. Self references, a task's own tag, unknown references, and circular dependencies are rejected. Title edits check for cycles when moving tasks between tags.
-
-For a numbered JSON dependency plan, `scripts/apply-dependency-plan.js --guild ID --plan FILE --team NAME` previews exact title matches and maps plan numbers to stable task IDs. Rows use `id`, `title`, `blocked_by` (soft links), and optional `hard_by`. Add `--apply` to save one atomic batch with a backup. Run it with the bot and deployment watcher stopped, then restart them so their task caches reload. Unknown or ambiguous titles and invalid graphs abort the whole plan. Plan files and backups stay on the server, outside the source repository.
-
-### Setting up teams
-
-1. A member with **Manage Server** permission opens `!task`, clicks **More**, **Setup Teams**, then **Edit Teams**. `!task teams setup` opens the same setup controls.
-2. Enter one group name per line (for example, Avionics, Software, and Mechanical), then submit the form.
-3. **Add Task** now includes a team dropdown. Existing tasks have a **Change team tag** dropdown for their creator, assignee, or a server manager.
-
-Each task has one optional team label, shown on the board, in task pickers, and in its details. It indicates which group the task is meant for. Teams need no Discord roles or membership setup; anyone can browse any team. Claiming, starting, releasing, or reassigning a task keeps its label. A label allows any member to claim an available task; existing ownership and explicit role-assignment permissions still apply.
-
-Older team tags and role-assigned tasks remain visible in **Team Tasks**, and their label is retained when someone claims them. Removing a team from setup keeps existing task labels and their browse view. Select **No team** on a task to clear its label. Team setup supports up to 24 names per server, each up to 50 characters. Reordering names keeps their task links; changing a name creates a new team, while the previous name remains on existing tasks.
-
-### Importing a task list
-
-1. A member with **Administrator** or **Manage Server** permission clicks **More**, then **Import Tasks**. Paste a short list, or upload the full list as a UTF-8 `.txt` or `.md` file. Use one input at a time. The form uses Discord's [file upload component](https://docs.discord.com/developers/components/reference#file-upload).
-2. Review the preview. Previous/Next shows each task's fields, and the attached preview file contains every entry and its full description.
-3. Click **Import Tasks** in the preview to save the batch. **Cancel** discards it. Tasks start unassigned in To Do, attributed to the person who imports them.
-
-Managers can also attach a text file to a message containing `!task import`, or paste a short list after that command. Only the person who submitted a list can confirm or cancel it, in the same server and channel. Confirmation checks that they still have manager permission. Anyone can continue creating individual tasks with Add Task.
-
-Use this format; blank descriptions are allowed. Numbering and section headings are optional:
-
-```text
-HAB-1 TASKS (2)
-Fields per task: Title / Description / Priority / Due date / Team
-
-========================================
-STM32
-========================================
-
-1.
-Title: [STM32] Pin map and SPI bus assignment
-Description: Add a mutex if tasks share a bus.
-Priority: high
-Due date: 2026-10-12
-Team: Cubesat
-
-2.
-Title: [STM32] Watchdog and reset-cause logging
-Description:
-Priority: high
-Due date: 2026-10-12
-Team: Cubesat
-```
-
-Team names match configured labels regardless of capitalization. Add unknown names using **Setup Teams** before importing. Only Title is required; omitted fields default to an empty description, medium priority, no due date, and no team. Descriptions can span several lines. Dates must be real calendar dates in `YYYY-MM-DD` format; blank or `none` clears an optional date or team.
-
-An import supports up to 250 tasks in a 256 KiB file; pasted form text supports 4,000 characters. Invalid entries block the whole import. Existing tasks with the same title and team are skipped, preserving their details and ownership. Duplicate entries in a file are skipped; repeated titles for the same team with conflicting details must be corrected. A confirmation checks for new duplicates again and saves all new tasks together. Previews expire after 15 minutes or a bot restart; submitting a new list replaces your preceding preview.
-
-### Core Flow
-
-- `!task` - Show the board once
-- `!task setup` - Create a live-updating board in the current channel (Manage Guild only)
-- `!task add [issue]` - Add an issue to the board
-- `!task import` - Open import instructions, or preview an attached text file / pasted list
-- `!task add Fix avionics @user by 2026-06-01` - Add and assign an issue with a due date
-- `!task move [key] [todo|doing|review|done]` - Move an issue between columns
-- `!task claim [key]` - Assign an issue to yourself
-- `!task start [key]` - Claim and move an issue to In Progress
-- `!task release [key]` / `!task unclaim [key]` - Return your issue to To Do
-- `!task available` / `!task mine` - Browse available issues or your active work
-- `!task teams` / `!task teamtasks` / `!task myteams` - Choose a team and browse its active issues
-- `!task done [key]` - Move an issue to Done
-- `!task reopen [key]` - Move an issue back to To Do
-- `!task refresh` - Manually refresh the live board (Manage Guild only)
-
-### Issue Details
-
-- `!task details [key]` - Show one issue as an embed
-- `!task assign [key] @user|@role|none` - Change issue assignee
-- `!task team [key] Team Name|none` - Set or clear the team label (names can contain spaces)
-- `!task priority [key] [low|medium|high|urgent]` - Set issue priority
-- `!task due [key] [date|none]` - Set or clear a due date
-- `!task depends [key] OTHER-1, !OTHER-2, [TAG]|none` - Set soft links and manager-only hard gates
-- `!task ready` / `!task readyonly` / `!task waiting` - Browse readiness
-- `!task edit [key] [new title]` - Rename an issue
-- `!task delete [key]` - Delete an issue
-
-### Aliases
-
-These run the same workflows as the commands above:
-
-- `!task board` / `!task kanban` / `!task jira` / `!task list` / `!task show` - Show the board
-- `!task status [key] [column]` - Same as `move`
-- `!task close [key]` - Same as `done`
-- `!task view [key]` - Same as `details`
-- `!task rename [key] [new title]` - Same as `edit`
-- `!task remove [key]` - Same as `delete`
-- `!task duedate [key] [date|none]` - Same as `due`
-- `!task commands` - Show the command list (same as `!task help` from the board module)
-
-Column names also accept aliases, for example `wip`, `in-progress`, `testing`, `complete`, and `closed`.
-
-### Add Options
-
-When creating an issue, you can use flags or inline options:
-
-- `!task add Fix avionics --unassigned` - Add without assigning to yourself
-- `!task add Fix avionics --me` - Add and assign to yourself (new tasks are otherwise unassigned)
-- `!task add Fix avionics --desc=Details here` - Add with a description
-- `!task add Fix avionics --priority=high --status=doing` - Set priority and starting column
-- `!task add Fix avionics priority:urgent column:review` - Inline priority/column syntax
-
-Issue keys can be the project key (e.g. `QSS-1`), the internal task ID, or the issue's position on the sorted board.
-
-### Setup
-
-- `!task setchannel [add|remove|list] [#channel]` - Manage channels where the bot operates
-- `!task teams setup` - Enter group names to use as team labels (Manage Server)
-- `!task role all @Role` - Mass-assign a role to non-pending, non-bot members in the server (Manage Roles)
-- `!task role all @Role remove` - Mass-remove a role from everyone
-- `!task verify setup #channel @Role` / `!task verify setup <channelID> <roleID>` - Set up emoji-type verification for new members (Manage Server)
-- `!task verify status` - Show current verification config and pending prompts
-- `!task verify off` - Disable verification
-- `!task help` - Show help message
+Aliases: `start` = claim, `close` = done, `release` = unclaim, `view` = details, `rename` = edit, `remove` = delete, and `board`/`list`/`kanban`/`jira` = show.
 
 ## Setup
 
@@ -197,7 +49,7 @@ Issue keys can be the project key (e.g. `QSS-1`), the internal task ID, or the i
 6. Enable the **Message Content** and **Server Members** privileged intents in the Developer Portal. Invite the bot with View Channels, Send Messages, Embed Links, and Read Message History permissions. Role and verification commands also need Manage Roles; verification cleanup needs Manage Messages.
 7. Run the bot: `npm start`
 8. Use `!task setchannel #your-task-channel` to restrict the bot to a specific channel (admin only)
-9. Use `!task setup` in a project channel to create a live Kanban board
+9. Use `!task setup` in a project channel to create the live task board
 
 ## Storage
 
@@ -236,7 +88,7 @@ npm run check
 npm test
 ```
 
-Tests cover self-assignment, competing claims, permissions, server isolation, team setup and filtering, tags surviving assignment, component limits, pagination, native modal submissions and file uploads, bulk import parsing and confirmation, duplicate handling, storage failures, and deployment recovery. They use temporary data and fake PM2 processes.
+Tests cover the claim/done flow, competing claims, permissions, the add/edit form, delete confirmation, import parsing, live board message syncing, Discord size limits, and deployment recovery. They use temporary data and fake PM2 processes.
 
 ## Contributing
 

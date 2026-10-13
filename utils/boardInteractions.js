@@ -1,320 +1,139 @@
-const { MessageFlags, PermissionFlagsBits, escapeMarkdown } = require('discord.js');
+const { MessageFlags } = require('discord.js');
 const board = require('../commands/board');
 const { canRunInChannel, getCachedServerConfig } = require('./serverConfig');
-const { buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks } = require('./boardComponents');
-const { sortBoardTasks, getIssueKey, normalizePriority, normalizeColumn, userCanManageIssue, claimError, releaseError, setTaskStatus, isManager } = require('./kanban');
-const { getConfiguredTeams, saveTeams, validateTeam, listTaskTeams, setTaskTeam, preserveTaskTeam } = require('./teams');
-const { readImportInput, prepareImport, getImportDraft, commitImport } = require('./taskImport');
-const { buildImportPreview, buildImportErrors } = require('./importComponents');
-const { prepareEdit, saveEdit } = require('./taskEditing');
-const { groupTasksByTag } = require('./taskTags');
-const { blockingError } = require('./taskDependencies');
-const { prepareDeletion, getDeletionDraft, reviewDeletion, commitDeletion } = require('./taskDeletion');
-const { buildDeletionTagPicker, buildDeletionPreview } = require('./deletionComponents');
+const { buildBoardComponents, buildTaskPicker, buildTaskView, buildDeleteConfirm, buildTaskModal } = require('./boardComponents');
+const { getIssueKey, parseDueDate, canChange } = require('./kanban');
+const { getImportDraft, commitImport } = require('./taskImport');
 
-function issuePayload(actor, task, content = '') {
-    return {
-        content,
-        embeds: [board.buildIssueEmbed(task, 0, actor)],
-        components: buildIssueComponents(task, actor),
-        allowedMentions: { parse: [] }
-    };
+const cannotChange = 'Only the person working on this task, its creator, or a manager can change it.';
+const taskActions = new Set(['select', 'view', 'delete', 'deleteconfirm', 'editsave', ...Object.keys(board.taskCommands)]);
+
+function readTaskForm(fields) {
+    const title = fields.getTextInputValue('title').trim();
+    const description = fields.getTextInputValue('description').trim();
+    const due = parseDueDate(fields.getTextInputValue('due'));
+    if (!title || title.length > 200) return { error: 'Give the task a title of 1–200 characters.' };
+    if (description.length > 2000) return { error: 'Keep the description to 2,000 characters.' };
+    if (!due.ok) return { error: 'Use a due date like 2026-12-01, or leave it blank.' };
+    return { title, description, dueDate: due.dueDate };
 }
 
 async function handleBoardInteraction(interaction) {
-    if (!interaction.customId?.startsWith('kanban:') || !(interaction.isButton() || interaction.isStringSelectMenu() || interaction.isRoleSelectMenu() || interaction.isModalSubmit())) return false;
+    if (!interaction.customId?.startsWith('kanban:') || !(interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit())) return false;
+    const ephemeral = content => interaction.reply({ content, flags: MessageFlags.Ephemeral });
     if (!interaction.inGuild()) {
-        await interaction.reply({ content: 'Use this board in a server.', flags: MessageFlags.Ephemeral });
+        await ephemeral('Use the task board in a server.');
         return true;
     }
-    const config = getCachedServerConfig(interaction.client, interaction.guildId);
-    if (!canRunInChannel(config, interaction.channelId, 'board')) {
-        await interaction.reply({ content: 'Task commands are disabled in this channel.', flags: MessageFlags.Ephemeral });
+    if (!canRunInChannel(getCachedServerConfig(interaction.client, interaction.guildId), interaction.channelId, 'board')) {
+        await ephemeral('Task commands are disabled in this channel.');
         return true;
     }
     if (interaction.member?.pending || interaction.client.pendingVerifications?.has(`${interaction.guildId}:${interaction.user.id}`)) {
-        await interaction.reply({ content: 'Finish verification before using the board.', flags: MessageFlags.Ephemeral });
+        await ephemeral('Finish verification before using the board.');
         return true;
     }
 
-    const [, action, target, page, selectedTeamId] = interaction.customId.split(':');
-    // Modal responses must be immediate. Discord supplies current permissions and
-    // role IDs on the interaction; saving rechecks a freshly fetched member.
-    const modalActor = {
-        client: interaction.client, guild: interaction.guild, author: interaction.user, channelId: interaction.channelId,
-        member: { permissions: interaction.memberPermissions || interaction.member?.permissions || { has: () => false }, roles: { cache: interaction.member?.roles?.cache || new Set(interaction.member?.roles || []) } }
-    };
-    if (action === 'edit' && interaction.isButton()) {
-        const tasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
-        const task = tasks.find(task => String(task.id) === target);
-        let error;
-        if (!task) error = 'This task no longer exists. Open Browse Tasks to choose another.';
-        else if (!userCanManageIssue(modalActor, task)) error = 'You do not have permission to edit this task.';
-        else if ((task.title || '').length > 4000 || (task.description || '').length > 4000) error = 'This task has text longer than the edit form supports. Use the text commands to edit it.';
-        if (error) await interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
-        else {
-            const draft = prepareEdit(modalActor, task);
-            await interaction.showModal(buildEditModal(task, draft.id, tasks));
-        }
-        return true;
-    }
-    if (action === 'import' && interaction.isButton()) {
-        if (!isManager(modalActor)) await interaction.reply({ content: 'You need Manage Server permission to import tasks. Use Add Task to create an individual task.', flags: MessageFlags.Ephemeral });
-        else await interaction.showModal(buildImportModal());
-        return true;
-    }
+    let [, action, target] = interaction.customId.split(':');
+    // Buttons on messages from older versions of the bot.
+    if (action === 'list' || action === 'page') action = target === 'mine' ? 'mine' : 'find', target = '0';
+    if (action === 'details') action = 'view';
+
+    const storage = interaction.client.taskStorage;
+    const actor = { client: interaction.client, guild: interaction.guild, author: interaction.user, member: { permissions: interaction.memberPermissions || interaction.member?.permissions } };
+    const taskId = action === 'select' ? interaction.values?.[0] : target;
+    const task = storage.getAllTasks(interaction.guildId).find(item => String(item.id) === taskId);
+
+    // Modals must be shown as the very first response.
     if (action === 'add' && interaction.isButton()) {
-        await interaction.showModal(buildAddModal(getConfiguredTeams({ client: interaction.client, guild: interaction.guild })));
+        await interaction.showModal(buildTaskModal());
         return true;
     }
-    if (action === 'teamsetup' && target === 'edit' && interaction.isButton()) {
-        const permissions = interaction.memberPermissions || interaction.member?.permissions;
-        if (!permissions || !(permissions.has(PermissionFlagsBits.Administrator) || permissions.has(PermissionFlagsBits.ManageGuild))) {
-            await interaction.reply({ content: 'You need Manage Server permission to set up teams.', flags: MessageFlags.Ephemeral });
-        } else await interaction.showModal(buildTeamSetupModal({ client: interaction.client, guild: interaction.guild }));
-        return true;
-    }
-
-    // Acknowledge before fetching a member or touching the board over the network.
-    if (!interaction.isModalSubmit() && interaction.message?.flags?.has(MessageFlags.Ephemeral)) {
-        await interaction.deferUpdate();
-    } else {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    }
-    const member = await interaction.guild.members.fetch({ user: interaction.user.id, force: true });
-    if (member.pending) {
-        await interaction.editReply({ content: 'Finish server verification before using the board.', embeds: [], components: [] });
-        return true;
-    }
-    const actor = { client: interaction.client, guild: interaction.guild, author: interaction.user, member, channelId: interaction.channelId };
-    const replyError = content => interaction.editReply({ content, embeds: [], components: [], allowedMentions: { parse: [] } });
-
-    if (['importpreview', 'importpage', 'importconfirm'].includes(action) && !isManager(actor)) {
-        await replyError('You need Manage Server permission to import tasks. Use Add Task to create an individual task.');
+    if (action === 'edit' && interaction.isButton()) {
+        if (!task) await ephemeral('This task no longer exists.');
+        else if (!canChange(actor, task)) await ephemeral(cannotChange);
+        else if ((task.title || '').length > 4000 || (task.description || '').length > 4000) await ephemeral('This task is too long for the edit form. Use `!task edit KEY New title`.');
+        else await interaction.showModal(buildTaskModal(task));
         return true;
     }
 
-    if (action === 'more') {
-        await interaction.editReply(buildMoreMenu(actor));
-        return true;
-    }
-
-    if (['delete', 'deletetags', 'deletetag', 'deletepage', 'deleteconfirm', 'deletecancel'].includes(action)) {
-        if (['deletetags', 'deletetag'].includes(action)) {
-            if (!isManager(actor)) await replyError('You need Manage Server permission to delete tasks by tag.');
-            else if (action === 'deletetags') await interaction.editReply(buildDeletionTagPicker(actor.client.taskStorage.getAllTasks(actor.guild.id), target));
-            else {
-                const result = prepareDeletion(actor, { tagId: interaction.values?.[0] });
-                if (result.error) await replyError(result.error);
-                else await interaction.editReply(buildDeletionPreview(result.draft, actor));
-            }
-        } else if (action === 'delete') {
-            const result = prepareDeletion(actor, { taskId: target });
-            if (result.error) await replyError(result.error);
-            else await interaction.editReply(buildDeletionPreview(result.draft, actor));
-        } else if (action === 'deletecancel') {
-            const result = getDeletionDraft(actor, target);
-            if (result.error) await replyError(result.error);
-            else {
-                actor.client.taskDeletes.delete(target);
-                await interaction.editReply(buildMoreMenu(actor, 'Deletion cancelled. No tasks were deleted.'));
-            }
-        } else if (action === 'deletepage') {
-            const result = reviewDeletion(actor, target);
-            if (result.error) await replyError(result.error);
-            else await interaction.editReply(buildDeletionPreview(result.draft, actor, page));
-        } else {
-            const result = commitDeletion(actor, target);
-            if (result.error && result.draft) await interaction.editReply({ ...buildDeletionPreview(result.draft, actor), content: result.error });
-            else if (result.error) await replyError(result.error);
-            else await interaction.editReply(buildMoreMenu(actor, `Deleted **${result.deleted} task(s)**${result.tag ? ` from **${escapeMarkdown(result.tag.name)}**` : ''}.`));
-        }
-        return true;
-    }
-
-    if (action === 'editsave' && interaction.isModalSubmit()) {
-        const { task, error } = saveEdit(actor, target, interaction.fields);
-        if (task) await interaction.editReply(issuePayload(actor, task, error || 'Task details saved. Use the dropdowns below to change its status or team.'));
-        else await replyError(error);
-        return true;
-    }
-
-    if (action === 'importpreview' && interaction.isModalSubmit()) {
-        let text;
-        try {
-            text = await readImportInput(interaction.fields.getTextInputValue('list'), [...(interaction.fields.getUploadedFiles('file')?.values() || [])]);
-        } catch (error) {
-            await interaction.editReply(buildImportErrors([error.message]));
-            return true;
-        }
-        const result = prepareImport(actor, text);
-        await interaction.editReply(result.errors ? buildImportErrors(result.errors) : buildImportPreview(result.draft, 0, true));
-        return true;
-    }
-
-    if (['importpage', 'importconfirm', 'importcancel'].includes(action)) {
+    // The import preview is a public message: only its author may change it.
+    if (action === 'importconfirm' || action === 'importcancel') {
         const { draft, error } = getImportDraft(actor, target);
         if (error) {
-            await replyError(error);
+            await ephemeral(error);
             return true;
         }
-        if (action === 'importpage') await interaction.editReply(buildImportPreview(draft, page));
-        else {
-            let payload;
-            if (action === 'importcancel') {
-                actor.client.taskImports.delete(draft.id);
-                payload = { content: 'Import cancelled. No tasks were added.', embeds: [], components: [], allowedMentions: { parse: [] } };
-            } else {
-                const result = commitImport(actor, draft);
-                if (result.error) {
-                    await interaction.editReply({ ...buildImportPreview(draft), content: result.error });
-                    return true;
-                }
-                const keys = result.created.map(task => task.issueKey);
-                payload = { content: `Imported **${keys.length} task(s)** into To Do, unassigned.${result.skipped ? ` Skipped ${result.skipped} duplicate(s).` : ''}${keys.length ? `\nIssue keys: ${keys[0]}${keys.length > 1 ? ` through ${keys.at(-1)}` : ''}.` : ''}`, embeds: [], components: [], allowedMentions: { parse: [] } };
-            }
-            // Text-command previews are public; clear their buttons after the owner finishes.
-            if (!interaction.message.flags.has(MessageFlags.Ephemeral)) await interaction.message.edit(payload);
-            await interaction.editReply(payload);
-        }
+        await interaction.deferUpdate();
+        let content = 'Import cancelled. Nothing was added.';
+        if (action === 'importconfirm') {
+            const result = commitImport(actor, draft);
+            content = result.error || `Imported **${result.created.length} task(s)** into To Do.${result.skipped ? ` Skipped ${result.skipped} duplicate title(s).` : ''}`;
+        } else interaction.client.taskImports.delete(draft.id);
+        await interaction.editReply({ content, embeds: [], components: [], allowedMentions: { parse: [] } });
         return true;
     }
 
-    if (action === 'teamsetup') {
-        if (!isManager(actor)) {
-            await replyError('You need Manage Server permission to set up teams. Use Team Tasks to browse any group’s work.');
-            return true;
-        }
-        if (target === 'clear' || (target === 'save' && interaction.isModalSubmit())) {
-            const error = saveTeams(actor, target === 'clear' ? [] : interaction.fields.getTextInputValue('names').split(/\r?\n/));
-            if (error) await replyError(error);
-            else {
-                await board.updateBoard(interaction.client, interaction.guildId);
-                await interaction.editReply(buildTeamSetup(actor, target === 'clear' ? 'Team setup cleared. Existing task labels are kept.' : 'Teams saved. The Add Task form now includes your team choices.'));
-            }
-        } else await interaction.editReply(buildTeamSetup(actor));
+    // Clicks inside a private view update it; clicks on the shared board open a private reply.
+    if (!interaction.isModalSubmit() && interaction.message?.flags?.has(MessageFlags.Ephemeral)) await interaction.deferUpdate();
+    else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const reply = payload => interaction.editReply({ embeds: [], components: [], allowedMentions: { parse: [] }, ...payload });
+
+    if (action === 'find' || action === 'mine') {
+        await reply(buildTaskPicker(storage.getAllTasks(interaction.guildId), action, target, actor));
         return true;
     }
 
     if (action === 'create' && interaction.isModalSubmit()) {
-        const title = interaction.fields.getTextInputValue('title').trim();
-        const description = interaction.fields.getTextInputValue('description').trim();
-        const priorityInput = interaction.fields.getTextInputValue('priority').trim();
-        const dueInput = interaction.fields.getTextInputValue('due').trim();
-        const priority = priorityInput ? normalizePriority(priorityInput) : 'medium';
-        const due = board.parseDueDate(dueInput);
-        // Old forms submitted after a restart may have no team field.
-        const teamValue = interaction.fields.fields?.has('team') ? interaction.fields.getStringSelectValues('team')?.[0] : null;
-        const teamId = teamValue && teamValue !== 'none' ? teamValue : null;
-        const teamError = validateTeam(actor, teamId);
-        if (!title || title.length > 200 || description.length > 2000) {
-            await replyError('Please give the task a title of 1–200 characters and a description of at most 2,000 characters.');
-        } else if (!priority) {
-            await replyError('Choose low, medium, high, or urgent for the priority.');
-        } else if (dueInput && (!/^\d{4}-\d{2}-\d{2}$/.test(dueInput) || !due.ok)) {
-            await replyError('Enter a real due date in YYYY-MM-DD format, or leave it blank.');
-        } else if (teamError) {
-            await replyError(teamError);
-        } else {
-            const task = board.createIssue(actor, { title, description, priority, dueDate: due.dueDate, status: 'todo', team: getConfiguredTeams(actor).find(team => team.id === teamId) });
-            if (!interaction.client.taskStorage.addTask(interaction.guildId, task)) await replyError('Failed to save the task.');
-            else await interaction.editReply(issuePayload(actor, task, `Created **${getIssueKey(task)}**. It is available for someone to claim.`));
-        }
+        const form = readTaskForm(interaction.fields);
+        const created = !form.error && board.createIssue(actor, form);
+        if (form.error) await reply({ content: form.error });
+        else if (!storage.addTask(interaction.guildId, created)) await reply({ content: 'Failed to save the task.' });
+        else await reply(buildTaskView(created, actor, `Created **${getIssueKey(created)}**. Anyone can claim it from **Find Work**.`));
         return true;
     }
 
-    if (['list', 'page', 'teamview', 'teamlist'].includes(action)) {
-        const allTasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
-        const filter = action === 'teamview' ? 'teams' : target === 'blocked' ? 'waiting' : ['ready', 'readyonly', 'waiting', 'available', 'mine', 'all', 'teams', 'tag'].includes(target) ? target : 'all';
-        const teamId = action === 'teamview' ? interaction.values?.[0] : selectedTeamId;
-        if (filter === 'tag' && !groupTasksByTag(allTasks).some(tag => tag.id === teamId)) {
-            await interaction.editReply(buildMoreMenu(actor, 'This tag no longer has tasks. Use Browse Tasks to see the current list.'));
-        } else if (action === 'teamlist' || (filter === 'teams' && !teamId)) {
-            await interaction.editReply(buildTeamPicker(allTasks, actor, action === 'teamlist' ? target : 0));
-        } else if (filter === 'teams' && !listTaskTeams(allTasks, actor).some(team => team.id === teamId)) {
-            await interaction.editReply(buildTeamPicker(allTasks, actor));
-        } else {
-            const tasks = sortBoardTasks(filterTasks(allTasks, filter, actor, teamId));
-            await interaction.editReply(buildTaskPicker(tasks, filter, action === 'teamview' ? 0 : page, actor, teamId));
-        }
+    if (!taskActions.has(action)) {
+        await reply({ content: 'This button is out of date. Run `!task` to open the current board.' });
         return true;
     }
-
-    if (action === 'refresh') {
-        if (!isManager(actor)) {
-            await replyError('You need Manage Server permission to refresh the live board. Task changes refresh it automatically.');
-            return true;
-        }
-        await board.updateBoard(interaction.client, interaction.guildId, { force: true });
-        await interaction.editReply(buildMoreMenu(actor, 'Board refreshed.'));
-        return true;
-    }
-
-    const id = action === 'select' ? interaction.values?.[0] : target;
-    // Look up stable storage IDs only; a deleted task must never resolve to a new board position.
-    const tasks = interaction.client.taskStorage.getAllTasks(interaction.guildId);
-    const task = tasks.find(item => String(item.id) === id);
     if (!task) {
-        await replyError('This task no longer exists. Open Browse Tasks to choose another.');
+        await reply({ content: 'This task no longer exists. Click **Find Work** to see current tasks.' });
         return true;
     }
 
-    let error = null;
-    let content = '';
-    if (action === 'claim' || action === 'start') {
-        error = claimError(actor, task);
-        if (!error && action === 'start') error = blockingError(task, tasks);
-        if (!error) {
-            preserveTaskTeam(task, actor);
-            task.userId = interaction.user.id;
-            task.assignedToRole = null;
-            task.assignedBy = interaction.user.id;
-            task.updatedAt = new Date().toISOString();
-            if (action === 'start') setTaskStatus(task, 'progress');
-            content = action === 'start' ? 'Assigned to you and moved to In Progress.' : 'Assigned to you.';
-        }
-    } else if (action === 'release') {
-        error = releaseError(actor, task);
-        if (!error) {
-            preserveTaskTeam(task, actor);
-            task.userId = null;
-            task.assignedToRole = null;
-            task.assignedBy = null;
-            setTaskStatus(task, 'todo');
-            content = 'Released back to To Do for someone else to claim.';
-        }
-    } else if (action === 'team') {
-        const teamId = interaction.values?.[0];
-        if (!userCanManageIssue(actor, task)) error = 'You do not have permission to change this task’s team.';
-        else if (!teamId) error = 'Choose a team or No team.';
-        else {
-            const selected = teamId === 'none' ? null : teamId;
-            error = validateTeam(actor, selected);
-            if (!error) {
-                setTaskTeam(task, getConfiguredTeams(actor).find(team => team.id === selected));
-                task.updatedAt = new Date().toISOString();
-                content = selected ? 'Team tag updated.' : 'Team tag cleared.';
-            }
-        }
-    } else if (action === 'status') {
-        const status = normalizeColumn(interaction.values?.[0]);
-        if (!userCanManageIssue(actor, task)) error = 'You do not have permission to change this task.';
-        else if (!status) error = 'Choose a valid task status.';
-        else if (status !== 'todo' && blockingError(task, tasks)) error = blockingError(task, tasks);
-        else {
-            setTaskStatus(task, status);
-            content = 'Task status updated.';
-        }
-    } else if (!['select', 'details'].includes(action)) {
-        await replyError('Unknown board action. Refresh the board and try again.');
+    if (action === 'select' || action === 'view') {
+        await reply(buildTaskView(task, actor));
         return true;
     }
 
-    // No awaits between reading the task, checking ownership, and saving it.
-    // Concurrent claims see the preceding claim instead of overwriting it.
-    if (!error && content && !interaction.client.taskStorage.updateTask(interaction.guildId, task.id, task)) error = 'Failed to save the task.';
-    if (error) await replyError(error);
-    else await interaction.editReply(issuePayload(actor, task, content));
+    if (action === 'delete' || action === 'deleteconfirm') {
+        if (!canChange(actor, task)) await reply({ content: cannotChange });
+        else if (action === 'delete') await reply(buildDeleteConfirm(task));
+        else if (!storage.deleteTask(interaction.guildId, task.id)) await reply({ content: 'Failed to delete the task.' });
+        else await reply({ content: `Deleted ${getIssueKey(task)}.`, components: buildBoardComponents() });
+        return true;
+    }
+
+    let content;
+    if (action === 'editsave' && interaction.isModalSubmit()) {
+        const form = readTaskForm(interaction.fields);
+        if (form.error) content = form.error;
+        else if (!canChange(actor, task)) content = cannotChange;
+        else {
+            Object.assign(task, form, { updatedAt: new Date().toISOString() });
+            content = storage.updateTask(interaction.guildId, task.id, task) ? 'Saved.' : 'Failed to save the task.';
+        }
+    } else {
+        // No awaits between reading, checking, and saving, so two quick claims cannot both win.
+        const { check, apply } = board.taskCommands[action];
+        content = check(actor, task);
+        if (!content) {
+            content = apply(actor, task);
+            if (!storage.updateTask(interaction.guildId, task.id, task)) content = 'Failed to save the task.';
+        }
+    }
+    await reply(buildTaskView(storage.getAllTasks(interaction.guildId).find(item => item.id === task.id) || task, actor, content));
     return true;
 }
 
