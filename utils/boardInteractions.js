@@ -34,7 +34,7 @@ async function handleBoardInteraction(interaction) {
         return true;
     }
 
-    let [, action, target] = interaction.customId.split(':');
+    let [, action, target, , category] = interaction.customId.split(':');
     // Buttons on messages from older versions of the bot.
     if (action === 'list' || action === 'page') action = target === 'mine' ? 'mine' : 'find', target = '0';
     if (action === 'details') action = 'view';
@@ -86,7 +86,11 @@ async function handleBoardInteraction(interaction) {
     const reply = payload => interaction.editReply({ embeds: [], components: [], allowedMentions: { parse: [] }, ...payload });
 
     if (action === 'find' || action === 'mine') {
-        await reply(buildTaskPicker(boardTasks(), action, target, actor));
+        await reply(buildTaskPicker(boardTasks(), action, target, actor, category));
+        return true;
+    }
+    if (action === 'filter' && interaction.isStringSelectMenu()) {
+        await reply(buildTaskPicker(boardTasks(), 'find', 0, actor, interaction.values?.[0]));
         return true;
     }
 
