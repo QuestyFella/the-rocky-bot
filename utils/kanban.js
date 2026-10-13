@@ -38,6 +38,19 @@ function formatDue(task) {
     return `${overdue ? '⚠️ overdue' : 'due'} ${dueFormat.format(date)}`;
 }
 
+// Fits text into a length limit, cutting at a word and marking the cut with an ellipsis.
+function clipText(text, length) {
+    const value = String(text || '').replace(/\s+/g, ' ').trim();
+    if (value.length <= length) return value;
+    const cut = value.slice(0, length - 1);
+    return `${cut.slice(0, cut.lastIndexOf(' ') > length / 2 ? cut.lastIndexOf(' ') : cut.length).replace(/[\s.,;:—-]+$/, '')}…`;
+}
+
+// The first paragraph of a description is its plain-language summary; details follow a blank line.
+function getSummary(task) {
+    return String(task.description || '').split(/\n\s*\n/)[0].trim();
+}
+
 function parseDueDate(input) {
     const value = String(input || '').trim();
     if (!value || ['none', 'clear'].includes(value.toLowerCase())) return { ok: true, dueDate: null };
@@ -88,6 +101,6 @@ function setTaskStatus(task, status) {
 }
 
 module.exports = {
-    columns, getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, parseDueDate,
+    columns, getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, clipText, getSummary, parseDueDate,
     getTaskBoard, getBlockers, isLocked, isManager, canChange, claimError, setTaskStatus
 };

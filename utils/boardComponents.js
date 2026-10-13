@@ -2,29 +2,17 @@ const {
     ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
     ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, EmbedBuilder, escapeMarkdown
 } = require('discord.js');
-const { getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, getBlockers, isLocked, canChange, claimError } = require('./kanban');
+const { getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, clipText, getSummary, getBlockers, isLocked, canChange, claimError } = require('./kanban');
+const { getTaskTag, getTagStyle } = require('./taskTags');
 
 const pageSize = 25;
 const short = (text, length) => String(text || '').slice(0, length);
-
-// Fits text into a dropdown line, cutting at a word and marking the cut with an ellipsis.
-function clip(text, length) {
-    const value = String(text || '').replace(/\s+/g, ' ').trim();
-    if (value.length <= length) return value;
-    const cut = value.slice(0, length - 1);
-    return `${cut.slice(0, cut.lastIndexOf(' ') > length / 2 ? cut.lastIndexOf(' ') : cut.length).replace(/[\s.,;:—-]+$/, '')}…`;
-}
-
-// The first paragraph of a description is its plain-language summary; details follow a blank line.
-function summary(task) {
-    return String(task.description || '').split(/\n\s*\n/)[0];
-}
 
 // Dropdown line under each task: its status (in My Tasks), due date, then the start of its summary.
 function optionLine(task, list) {
     const facts = [list === 'mine' ? getColumn(task).name : null, formatDue(task)].filter(Boolean).join(' · ');
     const room = 100 - (facts ? facts.length + 3 : 0);
-    const text = summary(task) && room > 20 ? clip(summary(task), room) : '';
+    const text = getSummary(task) && room > 20 ? clipText(getSummary(task), room) : '';
     return [facts, text].filter(Boolean).join(' · ') || getColumn(task).name;
 }
 const button = (id, label, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
@@ -59,6 +47,7 @@ function buildTaskPicker(allTasks, list, requestedPage, actor) {
             .addOptions(visible.map(task => ({
                 label: short(`${getIssueKey(task)}: ${task.title}`, 100),
                 value: String(task.id),
+                emoji: getTagStyle(getTaskTag(task).name).emoji,
                 description: optionLine(task, list)
             })))));
     }
@@ -77,13 +66,23 @@ function buildTaskPicker(allTasks, list, requestedPage, actor) {
     };
 }
 
+// Shows the summary first, then any details paragraphs, with labels like "Details:" in bold.
+function taskDescription(task) {
+    const paragraphs = String(task.description || '').split(/\n\s*\n/).map(text => text.trim()).filter(Boolean);
+    if (!paragraphs.length) return 'No description yet.';
+    return paragraphs.map((text, index) => index ? text.replace(/^([A-Z][A-Za-z ]{1,30}):\s*/, '**$1:** ') : text).join('\n\n');
+}
+
 function buildTaskEmbed(task, tasks) {
     const column = getColumn(task);
     const blockers = getBlockers(task, tasks);
+    const tag = getTaskTag(task);
+    const style = getTagStyle(tag.name);
     const embed = new EmbedBuilder()
-        .setColor(column.id === 'done' ? 0x2e7d32 : 0x0052cc)
-        .setTitle(short(`${getIssueKey(task)}: ${task.title}`, 256))
-        .setDescription(short(task.description || 'No description.', 4000))
+        .setColor(column.id === 'done' ? 0x2e7d32 : style.color)
+        .setAuthor({ name: `${style.emoji} ${tag.name}` })
+        .setTitle(short(`${getIssueKey(task)} · ${tag.title}`, 256))
+        .setDescription(short(taskDescription(task), 4000))
         .addFields(
             { name: 'Status', value: `${column.icon} ${column.name}`, inline: true },
             { name: 'Owner', value: task.userId ? `<@${task.userId}>` : 'Nobody yet', inline: true },
