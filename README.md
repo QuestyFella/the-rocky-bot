@@ -8,7 +8,7 @@ A manager runs `!task setup` once. The bot posts a live board that updates by it
 
 Members need three buttons:
 
-1. **Find Work**: pick an open task, then click **Claim**. The task becomes yours and moves to In Progress.
+1. **Find Work**: pick an open task (use the category menu at the top to show only one category), then click **Claim**. The task becomes yours and moves to In Progress.
 2. **My Tasks**: pick your task, then click **Mark Done**, or **Unclaim** to hand it back.
 3. **Add Task**: a short form with a title, an optional description, and an optional due date. Start the title with a tag like `[POWER]` to group it.
 

@@ -30,6 +30,7 @@ const json = payload => (payload.components || []).map(row => row.toJSON ? row.t
 // Every title, description, and field of a board's cards, as one string.
 const boardText = payloads => [].concat(payloads).flatMap(p => p.embeds.map(e => e.toJSON()))
     .map(e => [e.title, e.description, ...(e.fields || []).flatMap(f => [f.name, f.value])].filter(Boolean).join('\n')).join('\n');
+const taskOptions = payload => json(payload).flatMap(row => row.components).find(c => c.custom_id === 'kanban:select').options;
 const labels = payload => json(payload).flatMap(row => row.components).map(c => c.label).filter(Boolean);
 
 function validateMessage(payload) {
@@ -105,7 +106,7 @@ test('large boards split across messages within Discord limits and keep every op
 
 test('the task view shows its category, summary, and details, and the dropdown marks each category', async () => {
     const f = fixture({ task: { description: 'Build the battery pack.\n\nDetails: 2S Li-ion, 5 A fuse.' } });
-    const option = json((await interact(f, 'kanban:find:0')).payload)[0].components[0].options[0];
+    const option = taskOptions((await interact(f, 'kanban:find:0')).payload)[0];
     assert.equal(option.emoji.name, '⚡');
     const view = (await interact(f, 'kanban:select', { type: 'select', values: ['task-1'] })).payload.embeds[0].toJSON();
     assert.equal(view.author.name, '⚡ POWER');
@@ -115,10 +116,34 @@ test('the task view shows its category, summary, and details, and the dropdown m
     assert.deepEqual(card.fields[0], { name: 'RC-1 · Check battery', value: 'Build the battery pack.' });
 });
 
+test('Find Work can be narrowed to one category, and paging keeps the category', async () => {
+    const f = fixture();
+    const extra = Array.from({ length: 30 }, (_, i) => ({ id: `r${i}`, issueKey: `RC-${i + 10}`, title: `[RADIO] Job ${i}`, status: 'todo', createdAt: `2026-10-${String(i + 1).padStart(2, '0')}` }));
+    f.client.taskStorage.saveTasks(f.guild.id, [f.task(), ...extra]);
+    const all = (await interact(f, 'kanban:find:0')).payload;
+    const filter = json(all)[0].components[0];
+    assert.equal(filter.custom_id, 'kanban:filter:find');
+    assert.deepEqual(filter.options.map(o => [o.label, o.default]), [['All categories (31)', true], ['POWER (1)', false], ['RADIO (30)', false]]);
+    const radioId = filter.options[2].value;
+    const radio = (await interact(f, 'kanban:filter:find', { type: 'select', values: [radioId] })).payload;
+    assert.match(radio.content, /30 task\(s\) in 📡 RADIO · page 1\/2/);
+    assert.ok(taskOptions(radio).every(o => o.emoji.name === '📡'));
+    const next = json(radio).flatMap(row => row.components).find(c => c.label === 'Next').custom_id;
+    assert.equal(next, `kanban:find:1:page:${radioId}`);
+    const page2 = (await interact(f, next)).payload;
+    assert.equal(taskOptions(page2).length, 5);
+    assert.ok(taskOptions(page2).every(o => o.emoji.name === '📡'));
+    await interact(f, 'kanban:claim:task-1');
+    const power = filter.options[1].value;
+    const empty = (await interact(f, 'kanban:filter:find', { type: 'select', values: [power] })).payload;
+    assert.match(empty.content, /Nothing in POWER is open right now/);
+    assert.ok(json(empty)[0].components[0].options.find(o => o.value === power).default);
+});
+
 test('a member can find, claim, finish, and reopen a task with buttons', async () => {
     const f = fixture();
     const found = await interact(f, 'kanban:find:0', { privateMessage: false });
-    assert.equal(json(found.payload)[0].components[0].options[0].value, 'task-1');
+    assert.equal(taskOptions(found.payload)[0].value, 'task-1');
     const view = await interact(f, 'kanban:select', { type: 'select', values: ['task-1'] });
     assert.deepEqual(labels(view.payload), ['Claim', 'Find Work', 'My Tasks']);
     const claimed = await interact(f, 'kanban:claim:task-1');
@@ -126,7 +151,7 @@ test('a member can find, claim, finish, and reopen a task with buttons', async (
     assert.equal(getTaskStatus(f.task()), 'progress');
     assert.deepEqual(labels(claimed.payload), ['Mark Done', 'Unclaim', 'Edit', 'Delete', 'Find Work', 'My Tasks']);
     const mine = await interact(f, 'kanban:mine:0');
-    assert.equal(json(mine.payload)[0].components[0].options.length, 1);
+    assert.equal(taskOptions(mine.payload).length, 1);
     await interact(f, 'kanban:done:task-1');
     assert.equal(getTaskStatus(f.task()), 'done');
     await interact(f, 'kanban:reopen:task-1');
@@ -138,16 +163,16 @@ test('a member can find, claim, finish, and reopen a task with buttons', async (
 
 test('Find Work options show the due date and the start of the plain-language summary', async () => {
     const f = fixture({ task: { dueDate: '2026-11-01', description: 'Start the code for the BMP280 pressure sensor, which tells us altitude: set up the driver and check the chip answers with the right ID.\n\nDetails: Chip ID 0x58.' } });
-    const option = json((await interact(f, 'kanban:find:0')).payload)[0].components[0].options[0];
+    const option = taskOptions((await interact(f, 'kanban:find:0')).payload)[0];
     assert.match(option.description, /^due 1 Nov 2026 · Start the code for the BMP280 pressure sensor/);
     assert.match(option.description, /…$/);
     assert.ok(option.description.length <= 100);
     assert.doesNotMatch(option.description, /Details|0x58/);
     await interact(f, 'kanban:claim:task-1');
-    const mine = json((await interact(f, 'kanban:mine:0')).payload)[0].components[0].options[0];
+    const mine = taskOptions((await interact(f, 'kanban:mine:0')).payload)[0];
     assert.match(mine.description, /^In Progress · due 1 Nov 2026 · Start the code/);
     const bare = fixture({ task: { description: '' } });
-    assert.equal(json((await interact(bare, 'kanban:find:0')).payload)[0].components[0].options[0].description, 'To Do');
+    assert.equal(taskOptions((await interact(bare, 'kanban:find:0')).payload)[0].description, 'To Do');
 });
 
 test('Find Work pages through every open task without duplicate button IDs', async () => {
@@ -157,7 +182,7 @@ test('Find Work pages through every open task without duplicate button IDs', asy
     const seen = new Set();
     for (const customId of ['kanban:find:0', 'kanban:find:1:page', 'kanban:find:2:page']) {
         const { payload } = await interact(f, customId);
-        for (const option of json(payload)[0].components[0].options) seen.add(option.value);
+        for (const option of taskOptions(payload)) seen.add(option.value);
     }
     assert.equal(seen.size, 73);
     assert.match((await interact(f, 'kanban:find:1:page')).payload.content, /page 2\/3/);
@@ -281,7 +306,7 @@ test('blocked tasks stay hidden until same-category blockers are done; other cat
     assert.doesNotMatch(text(), /Regulator test/);
     assert.match(text(), /⚡ POWER\n\*\*1\*\* ready to claim  ·  🔒 1 more unlock as these finish/);
     assert.match(text(), /RC-3/, 'a blocker in another category is ignored');
-    const options = async () => json((await interact(f, 'kanban:find:0')).payload)[0].components[0].options.map(o => o.value);
+    const options = async () => taskOptions((await interact(f, 'kanban:find:0')).payload).map(o => o.value);
     assert.deepEqual((await options()).sort(), ['c', 'task-1']);
     assert.match((await interact(f, 'kanban:claim:b')).payload.content, /unlocks after RC-1/);
     await interact(f, 'kanban:claim:task-1');
