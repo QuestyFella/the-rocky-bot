@@ -34,12 +34,34 @@ function filterTasks(tasks, list, actor) {
     return tasks.filter(task => !task.userId && getTaskStatus(task) !== 'done' && !isLocked(task, tasks));
 }
 
-function buildTaskPicker(allTasks, list, requestedPage, actor) {
-    const tasks = sortBoardTasks(filterTasks(allTasks, list, actor));
+// Find Work can be narrowed to one category; "all" (the default) shows every category.
+function buildCategoryFilter(allTasks, tasks, category) {
+    const counts = new Map();
+    for (const task of tasks) {
+        const tag = getTaskTag(task);
+        counts.set(tag.id, { name: tag.name, count: (counts.get(tag.id)?.count || 0) + 1 });
+    }
+    // Keep the chosen category in the list even when nothing in it is open any more.
+    const chosen = allTasks.map(getTaskTag).find(tag => tag.id === category);
+    if (chosen && !counts.has(chosen.id)) counts.set(chosen.id, { name: chosen.name, count: 0 });
+    if (counts.size < 2 && !chosen) return null;
+    const options = [{ label: `All categories (${tasks.length})`, value: 'all', emoji: '🗂️', default: !chosen }];
+    for (const [id, { name, count }] of [...counts].sort((a, b) => a[1].name.localeCompare(b[1].name, 'en')).slice(0, 24)) {
+        options.push({ label: short(`${name} (${count})`, 100), value: id, emoji: getTagStyle(name).emoji, default: id === chosen?.id });
+    }
+    return new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('kanban:filter:find').setPlaceholder('Category').addOptions(options));
+}
+
+function buildTaskPicker(allTasks, list, requestedPage, actor, category = 'all') {
+    const open = filterTasks(allTasks, list, actor);
+    const chosen = list === 'find' && category !== 'all' ? allTasks.map(getTaskTag).find(tag => tag.id === category) : null;
+    const tasks = sortBoardTasks(chosen ? open.filter(task => getTaskTag(task).id === chosen.id) : open);
     const pageCount = Math.max(1, Math.ceil(tasks.length / pageSize));
     const page = Math.max(0, Math.min(Number(requestedPage) || 0, pageCount - 1));
     const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
     const components = [];
+    const filter = list === 'find' && buildCategoryFilter(allTasks, open, chosen?.id);
+    if (filter) components.push(filter);
     if (visible.length) {
         components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
             .setCustomId('kanban:select')
@@ -52,16 +74,19 @@ function buildTaskPicker(allTasks, list, requestedPage, actor) {
             })))));
     }
     if (pageCount > 1) {
+        const suffix = chosen ? `:page:${chosen.id}` : ':page';
         components.push(new ActionRowBuilder().addComponents(
-            // The trailing ":page" keeps these IDs distinct from the Find Work / My Tasks buttons below.
-            button(`kanban:${list}:${page - 1}:page`, 'Previous').setDisabled(page === 0),
-            button(`kanban:${list}:${page + 1}:page`, 'Next').setDisabled(page === pageCount - 1)
+            // The ":page" part keeps these IDs distinct from the Find Work / My Tasks buttons below.
+            button(`kanban:${list}:${page - 1}${suffix}`, 'Previous').setDisabled(page === 0),
+            button(`kanban:${list}:${page + 1}${suffix}`, 'Next').setDisabled(page === pageCount - 1)
         ));
     }
     components.push(...buildBoardComponents());
     const { label, empty, hint } = lists[list];
+    const where = chosen ? ` in ${getTagStyle(chosen.name).emoji} ${escapeMarkdown(chosen.name)}` : '';
+    const none = chosen ? `Nothing in ${escapeMarkdown(chosen.name)} is open right now. Pick another category above.` : empty;
     return {
-        content: `**${label}** — ${tasks.length} task(s)${pageCount > 1 ? ` · page ${page + 1}/${pageCount}` : ''}\n${visible.length ? hint : empty}`,
+        content: `**${label}** — ${tasks.length} task(s)${where}${pageCount > 1 ? ` · page ${page + 1}/${pageCount}` : ''}\n${visible.length ? hint : none}`,
         embeds: [], components, allowedMentions: { parse: [] }
     };
 }
