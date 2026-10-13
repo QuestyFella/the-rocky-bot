@@ -234,3 +234,109 @@ test('the live board edits its messages, adds parts as it grows, and removes ext
     assert.deepEqual([...sent.keys()], ['m1']);
     assert.match(sent.get('m1').payload.embeds[0].toJSON().description, /Check battery/);
 });
+
+test('blocked tasks stay hidden until same-category blockers are done; other categories never block', async () => {
+    const f = fixture();
+    const base = { status: 'todo', completed: false, createdBy: 'bob', userId: null };
+    f.client.taskStorage.saveTasks(f.guild.id, [
+        f.task(),
+        { ...base, id: 'b', issueKey: 'RC-2', title: '[POWER] Regulator test', blockedBy: ['task-1'] },
+        { ...base, id: 'c', issueKey: 'RC-3', title: '[RADIO] Driver', blockedBy: ['task-1'] }
+    ]);
+    const text = () => board.generateBoardMessages(f.client, f.guild.id)[0].embeds[0].toJSON().description;
+    assert.doesNotMatch(text(), /Regulator test/);
+    assert.match(text(), /__POWER__ · 🔒 1 more unlock as these finish/);
+    assert.match(text(), /RC-3/, 'a blocker in another category is ignored');
+    const options = async () => json((await interact(f, 'kanban:find:0')).payload)[0].components[0].options.map(o => o.value);
+    assert.deepEqual((await options()).sort(), ['c', 'task-1']);
+    assert.match((await interact(f, 'kanban:claim:b')).payload.content, /unlocks after RC-1/);
+    await interact(f, 'kanban:claim:task-1');
+    await interact(f, 'kanban:done:task-1');
+    assert.match(text(), /Regulator test/);
+    assert.ok((await options()).includes('b'));
+});
+
+test('the exec board keeps its tasks separate from the main board', async () => {
+    const f = fixture();
+    const sent = [];
+    const channel = id => ({ id, send: async payload => { const m = { id: `${id}-m${sent.length}`, author: { id: 'bot' }, edit: async () => {} }; sent.push(payload); return m; }, messages: { fetch: async () => { throw Object.assign(new Error('Unknown'), { code: 10008 }); } } });
+    f.client.user = { id: 'bot' };
+    f.client.channels = { fetch: async id => channel(id) };
+    const replies = [];
+    const message = (channelId, userId = 'admin') => ({ client: f.client, guild: f.guild, channel: channel(channelId), member: { permissions: new PermissionsBitField(userId === 'admin' ? [PermissionFlagsBits.ManageGuild] : []) }, author: { id: userId }, reply: async text => replies.push(text), mentions: { users: new Collection() } });
+    await board.execute(message('exec-channel'), ['setup', 'exec']);
+    await board.execute(message('exec-channel'), ['add', '[LEGAL]', 'Request', 'NOTAM']);
+    const execTask = f.client.taskStorage.getAllTasks(f.guild.id).find(task => task.title === '[LEGAL] Request NOTAM');
+    assert.equal(execTask.board, 'exec');
+    assert.doesNotMatch(board.generateBoardMessages(f.client, f.guild.id).map(p => p.embeds[0].toJSON().description).join(), /NOTAM/);
+    assert.match(board.generateBoardMessages(f.client, f.guild.id, 'exec')[0].embeds[0].toJSON().description, /NOTAM/);
+    await board.execute(message('main-channel', 'carol'), ['claim', execTask.id]);
+    assert.match(replies.at(-1), /could not find/);
+    const fromMain = await interact(f, `kanban:claim:${execTask.id}`);
+    assert.match(fromMain.payload.content, /no longer exists/);
+});
+
+test('!task block only links tasks in the same category and refuses loops', async () => {
+    const f = fixture();
+    f.client.taskStorage.saveTasks(f.guild.id, [f.task(),
+        { id: 'b', issueKey: 'RC-2', title: '[POWER] Regulator', status: 'todo' },
+        { id: 'c', issueKey: 'RC-3', title: '[RADIO] Driver', status: 'todo' }]);
+    const replies = [];
+    const run = (args, manager = true) => board.execute({ client: f.client, guild: f.guild, channel: { id: 'main' }, member: { permissions: new PermissionsBitField(manager ? [PermissionFlagsBits.ManageGuild] : []) }, author: { id: 'admin' }, reply: async text => replies.push(text), mentions: { users: new Collection() } }, args);
+    await run(['block', 'RC-2', 'RC-1'], false);
+    assert.match(replies.at(-1), /Only managers/);
+    await run(['block', 'RC-2', 'RC-3']);
+    assert.match(replies.at(-1), /same category/);
+    await run(['block', 'RC-2', 'RC-1']);
+    assert.deepEqual(f.client.taskStorage.getAllTasks(f.guild.id).find(t => t.id === 'b').blockedBy, ['task-1']);
+    await run(['block', 'RC-1', 'RC-2']);
+    assert.match(replies.at(-1), /loop/);
+    await run(['block', 'RC-2', 'none']);
+    assert.deepEqual(f.client.taskStorage.getAllTasks(f.guild.id).find(t => t.id === 'b').blockedBy, []);
+});
+
+test('the board plan script retags, moves, and blocks tasks, and rejects cross-category blockers', () => {
+    const { applyPlan } = require('../scripts/apply-board-plan');
+    const tasks = [
+        { id: '1', issueKey: 'U-1', title: '[STM32] Pin map', dependsOn: ['2'] },
+        { id: '2', issueKey: 'U-2', title: '[BMP280] Driver' },
+        { id: '3', issueKey: 'U-3', title: '[REG] NOTAM' }
+    ];
+    const good = applyPlan(tasks, [
+        { key: 'U-1', title: '[FIRMWARE] Pin map' },
+        { key: 'U-2', title: '[FIRMWARE] BMP280 driver', blockedBy: ['U-1'] },
+        { key: 'U-3', title: '[LEGAL] NOTAM', board: 'exec' }
+    ]);
+    assert.deepEqual(good.errors, []);
+    assert.equal(good.tasks[1].blockedBy[0], '1');
+    assert.equal(good.tasks[2].board, 'exec');
+    assert.equal(good.tasks[0].dependsOn, undefined);
+    assert.equal(tasks[0].title, '[STM32] Pin map', 'the input is not modified');
+    assert.match(applyPlan(tasks, [{ key: 'U-2', blockedBy: ['U-1'] }]).errors[0], /STM32, not BMP280/);
+    assert.match(applyPlan(tasks, [{ key: 'U-1', title: '[A] x', blockedBy: ['U-2'] }, { key: 'U-2', title: '[A] y', blockedBy: ['U-1'] }]).errors.join(), /loop/);
+});
+
+test('the board plan script adds, deletes, dates, and describes tasks, and catches out-of-order dates', () => {
+    const { applyPlan } = require('../scripts/apply-board-plan');
+    const tasks = [
+        { id: '1', issueKey: 'U-1', title: 'test' },
+        { id: '2', issueKey: 'U-2', title: '[A] First', description: 'Old.' },
+        { id: '3', issueKey: 'U-3', title: '[A] Second', blockedBy: ['1'] }
+    ];
+    const result = applyPlan(tasks, [
+        { key: 'U-1', delete: true },
+        { key: 'U-2', dueDate: '2026-11-01', description: 'Old. New.' },
+        { new: 'third', title: '[A] Third', dueDate: '2026-11-08', blockedBy: ['U-2'] },
+        { key: 'U-3', blockedBy: ['third'], dueDate: null }
+    ], { projectKey: 'U', nextIssueNumber: 4, now: '2026-10-13T00:00:00Z' });
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(result.tasks.map(task => task.issueKey), ['U-2', 'U-3', 'U-4']);
+    assert.equal(result.nextIssueNumber, 5);
+    const third = result.tasks.find(task => task.issueKey === 'U-4');
+    assert.deepEqual(third.blockedBy, ['2']);
+    assert.deepEqual(result.tasks.find(task => task.issueKey === 'U-3').blockedBy, [third.id]);
+    assert.equal(result.tasks[0].description, 'Old. New.');
+    assert.equal(result.tasks[1].dueDate, null);
+    assert.match(applyPlan(tasks, [{ key: 'U-3', title: '[A] Second', dueDate: '2026-10-01', blockedBy: ['U-2'] }, { key: 'U-2', dueDate: '2026-11-01' }]).errors[0], /before its blocker U-2/);
+    assert.match(applyPlan(tasks, [{ key: 'U-2', delete: true }, { key: 'U-3', blockedBy: ['U-2'] }]).errors[0], /being deleted/);
+});

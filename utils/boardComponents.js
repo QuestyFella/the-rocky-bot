@@ -2,7 +2,7 @@ const {
     ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
     ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, EmbedBuilder, escapeMarkdown
 } = require('discord.js');
-const { getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, canChange, claimError } = require('./kanban');
+const { getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, getBlockers, isLocked, canChange, claimError } = require('./kanban');
 
 const pageSize = 25;
 const short = (text, length) => String(text || '').slice(0, length);
@@ -22,7 +22,7 @@ function buildBoardComponents() {
 
 function filterTasks(tasks, list, actor) {
     if (list === 'mine') return tasks.filter(task => task.userId === actor.author.id && getTaskStatus(task) !== 'done');
-    return tasks.filter(task => !task.userId && getTaskStatus(task) !== 'done');
+    return tasks.filter(task => !task.userId && getTaskStatus(task) !== 'done' && !isLocked(task, tasks));
 }
 
 function buildTaskPicker(allTasks, list, requestedPage, actor) {
@@ -56,9 +56,10 @@ function buildTaskPicker(allTasks, list, requestedPage, actor) {
     };
 }
 
-function buildTaskEmbed(task) {
+function buildTaskEmbed(task, tasks) {
     const column = getColumn(task);
-    return new EmbedBuilder()
+    const blockers = getBlockers(task, tasks);
+    const embed = new EmbedBuilder()
         .setColor(column.id === 'done' ? 0x2e7d32 : 0x0052cc)
         .setTitle(short(`${getIssueKey(task)}: ${task.title}`, 256))
         .setDescription(short(task.description || 'No description.', 4000))
@@ -67,13 +68,15 @@ function buildTaskEmbed(task) {
             { name: 'Owner', value: task.userId ? `<@${task.userId}>` : 'Nobody yet', inline: true },
             { name: 'Due', value: formatDue(task) || 'No due date', inline: true }
         );
+    if (blockers.length) embed.addFields({ name: isLocked(task, tasks) ? '🔒 Locked until done' : 'Waiting on', value: short(blockers.map(other => `${getIssueKey(other)}: ${other.title}`).join('\n'), 1024) });
+    return embed;
 }
 
-function buildTaskComponents(task, actor) {
+function buildTaskComponents(task, actor, tasks) {
     const id = String(task.id);
     const status = getTaskStatus(task);
     const controls = [];
-    if (status !== 'done' && task.userId !== actor.author.id && !claimError(actor, task)) controls.push(button(`kanban:claim:${id}`, 'Claim', ButtonStyle.Success));
+    if (status !== 'done' && task.userId !== actor.author.id && !claimError(actor, task, tasks)) controls.push(button(`kanban:claim:${id}`, 'Claim', ButtonStyle.Success));
     if (canChange(actor, task)) {
         if (status !== 'done') controls.push(button(`kanban:done:${id}`, 'Mark Done', ButtonStyle.Success));
         if (status !== 'done' && task.userId) controls.push(button(`kanban:unclaim:${id}`, 'Unclaim'));
@@ -87,7 +90,8 @@ function buildTaskComponents(task, actor) {
 }
 
 function buildTaskView(task, actor, content = '') {
-    return { content, embeds: [buildTaskEmbed(task)], components: buildTaskComponents(task, actor), allowedMentions: { parse: [] } };
+    const tasks = actor.client.taskStorage.getAllTasks(actor.guild.id);
+    return { content, embeds: [buildTaskEmbed(task, tasks)], components: buildTaskComponents(task, actor, tasks), allowedMentions: { parse: [] } };
 }
 
 function buildDeleteConfirm(task) {

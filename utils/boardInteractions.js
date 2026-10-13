@@ -40,9 +40,15 @@ async function handleBoardInteraction(interaction) {
     if (action === 'details') action = 'view';
 
     const storage = interaction.client.taskStorage;
-    const actor = { client: interaction.client, guild: interaction.guild, author: interaction.user, member: { permissions: interaction.memberPermissions || interaction.member?.permissions } };
+    const actor = {
+        client: interaction.client, guild: interaction.guild, author: interaction.user,
+        member: { permissions: interaction.memberPermissions || interaction.member?.permissions },
+        board: board.boardForChannel(interaction.guildId, interaction.channelId)
+    };
+    // Each channel only sees and changes the tasks of its own board.
+    const boardTasks = () => board.boardTasks(interaction.client, interaction.guildId, actor.board);
     const taskId = action === 'select' ? interaction.values?.[0] : target;
-    const task = storage.getAllTasks(interaction.guildId).find(item => String(item.id) === taskId);
+    const task = boardTasks().find(item => String(item.id) === taskId);
 
     // Modals must be shown as the very first response.
     if (action === 'add' && interaction.isButton()) {
@@ -80,7 +86,7 @@ async function handleBoardInteraction(interaction) {
     const reply = payload => interaction.editReply({ embeds: [], components: [], allowedMentions: { parse: [] }, ...payload });
 
     if (action === 'find' || action === 'mine') {
-        await reply(buildTaskPicker(storage.getAllTasks(interaction.guildId), action, target, actor));
+        await reply(buildTaskPicker(boardTasks(), action, target, actor));
         return true;
     }
 
@@ -127,7 +133,7 @@ async function handleBoardInteraction(interaction) {
     } else {
         // No awaits between reading, checking, and saving, so two quick claims cannot both win.
         const { check, apply } = board.taskCommands[action];
-        content = check(actor, task);
+        content = check(actor, task, boardTasks());
         if (!content) {
             content = apply(actor, task);
             if (!storage.updateTask(interaction.guildId, task.id, task)) content = 'Failed to save the task.';

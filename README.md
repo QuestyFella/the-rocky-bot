@@ -12,6 +12,10 @@ Members need three buttons:
 2. **My Tasks**: pick your task, then click **Mark Done**, or **Unclaim** to hand it back.
 3. **Add Task**: a short form with a title, an optional description, and an optional due date. Start the title with a tag like `[POWER]` to group it.
 
+**Locked tasks.** A task can be blocked by other tasks in the same `[TAG]` category. It stays hidden from the board and Find Work, and can't be claimed, until those tasks are done. The board shows how many tasks are still locked in each category. Tasks in other categories never block it. Managers set blockers with `!task block KEY OTHER-1, OTHER-2` (or `none`).
+
+**Exec board.** A manager runs `!task setup exec` in a private exec channel. Tasks added or imported there go on the exec board only. Each channel only sees, and can only change, its own board's tasks.
+
 The person working on a task, its creator, and server managers (Manage Server or Administrator) can mark it done, unclaim, reopen, edit, or delete it. Deleting asks for confirmation. Task views are private to the person who clicked.
 
 ## Commands
@@ -27,6 +31,8 @@ The person working on a task, its creator, and server managers (Manage Server or
 Managers:
 
 - `!task setup` - Post the live board in the current channel
+- `!task setup exec` - Post the exec board in the current channel
+- `!task block KEY OTHER-1, OTHER-2|none` - Hide a task until the listed same-category tasks are done
 - `!task refresh` - Redraw the live board
 - `!task assign KEY @user|none` - Assign a task to someone
 - `!task import` - Attach a `.txt`/`.md` list or paste it after the command, then confirm the preview. Each task starts with `Title:`, optionally followed by `Description:` (can span lines) and `Due date: YYYY-MM-DD`. Numbering, headings, and the old `Priority:`/`Team:` lines are ignored. Titles already on the board are skipped. Up to 250 tasks per import.
@@ -34,6 +40,18 @@ Managers:
 - `!task role all @Role [remove]` - Add or remove a role for everyone (Manage Roles)
 
 Aliases: `start` = claim, `close` = done, `release` = unclaim, `view` = details, `rename` = edit, `remove` = delete, and `board`/`list`/`kanban`/`jira` = show.
+
+## Reorganizing existing tasks
+
+`scripts/apply-board-plan.js` applies a JSON plan that sets each task's title (and so its category), board, and blockers. It previews by default and checks that blockers are in the same category and form no loops. With `--apply` it saves a backup next to the task file. Stop the bot first, because it caches tasks in memory:
+
+```sh
+pm2 stop the-bot
+BOT_DATA_DIR=~/the-rocky-bot node scripts/apply-board-plan.js --guild ID --plan plan.json --apply
+pm2 start the-bot
+```
+
+Plan rows look like `{ "key": "URC-15", "title": "[FIRMWARE] Watchdog", "board": "main", "blockedBy": ["URC-14"] }`. Plan files and backups stay on the server, outside the repository.
 
 ## Setup
 

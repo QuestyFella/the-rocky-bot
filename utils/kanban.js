@@ -1,4 +1,5 @@
 const { PermissionFlagsBits } = require('discord.js');
+const { getTaskTag } = require('./taskTags');
 
 const columns = [
     { id: 'todo', name: 'To Do', icon: '📥' },
@@ -45,6 +46,24 @@ function parseDueDate(input) {
     return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value ? { ok: true, dueDate: value } : { ok: false };
 }
 
+function getTaskBoard(task) {
+    return task.board === 'exec' ? 'exec' : 'main';
+}
+
+// Unfinished tasks this one waits on. Only blockers in the same [TAG] category count,
+// so one category can never hold up another. Deleted blockers no longer block.
+function getBlockers(task, tasks) {
+    const tag = getTaskTag(task).id;
+    return (task.blockedBy || [])
+        .map(id => tasks.find(other => other.id === id))
+        .filter(other => other && other.id !== task.id && getTaskTag(other).id === tag && getTaskStatus(other) !== 'done');
+}
+
+// Blocked tasks stay hidden until their blockers are done, unless someone already took them on.
+function isLocked(task, tasks) {
+    return getTaskStatus(task) === 'todo' && !task.userId && getBlockers(task, tasks).length > 0;
+}
+
 function isManager(actor) {
     const permissions = actor.member?.permissions;
     return Boolean(permissions?.has(PermissionFlagsBits.Administrator) || permissions?.has(PermissionFlagsBits.ManageGuild));
@@ -55,8 +74,9 @@ function canChange(actor, task) {
     return isManager(actor) || task.userId === actor.author.id || task.createdBy === actor.author.id;
 }
 
-function claimError(actor, task) {
+function claimError(actor, task, tasks = []) {
     if (getTaskStatus(task) === 'done') return 'This task is already done.';
+    if (isLocked(task, tasks)) return `This task unlocks after ${getBlockers(task, tasks).map(getIssueKey).join(', ')} ${getBlockers(task, tasks).length > 1 ? 'are' : 'is'} done.`;
     if (task.userId && task.userId !== actor.author.id) return 'Someone else is already working on this task.';
     return null;
 }
@@ -69,5 +89,5 @@ function setTaskStatus(task, status) {
 
 module.exports = {
     columns, getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, parseDueDate,
-    isManager, canChange, claimError, setTaskStatus
+    getTaskBoard, getBlockers, isLocked, isManager, canChange, claimError, setTaskStatus
 };

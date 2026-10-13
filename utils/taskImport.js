@@ -91,7 +91,7 @@ function prepareImport(actor, text) {
     if (errors.length) return { errors };
     const drafts = actor.client.taskImports ||= new Map();
     for (const [id, draft] of drafts) if (draft.expiresAt <= Date.now()) drafts.delete(id);
-    const draft = { id: randomUUID(), guildId: actor.guild.id, userId: actor.author.id, expiresAt: Date.now() + previewLifetimeMs, rows: tasks };
+    const draft = { id: randomUUID(), guildId: actor.guild.id, userId: actor.author.id, board: actor.board || 'main', expiresAt: Date.now() + previewLifetimeMs, rows: tasks };
     drafts.set(draft.id, draft);
     return { draft };
 }
@@ -105,7 +105,7 @@ function getImportDraft(actor, id) {
 
 function commitImport(actor, draft) {
     const board = require('../commands/board');
-    const created = newRows(actor, draft.rows).map(row => board.createIssue(actor, row));
+    const created = newRows(actor, draft.rows).map(row => board.createIssue(actor, row, draft.board));
     const existing = actor.client.taskStorage.getAllTasks(actor.guild.id);
     if (created.length && !actor.client.taskStorage.saveTasks(actor.guild.id, [...existing, ...created])) return { error: 'Failed to save tasks. Nothing was imported.' };
     actor.client.taskImports.delete(draft.id);
