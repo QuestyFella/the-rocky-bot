@@ -1,244 +1,123 @@
 const {
     ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
-    ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, FileUploadBuilder, EmbedBuilder, escapeMarkdown
+    ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, EmbedBuilder, escapeMarkdown
 } = require('discord.js');
-const { columns, priorities, getTaskStatus, getTaskPriority, getIssueKey, claimError, releaseError, userCanManageIssue, isManager } = require('./kanban');
-const { getConfiguredTeams, getTaskTeam, listTaskTeams, maxTeams, maxTeamNameLength } = require('./teams');
-const { getTaskTag } = require('./taskTags');
-const { isWaiting, isHardBlocked, blockingSummary, dependencyInput } = require('./taskDependencies');
+const { getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, canChange, claimError } = require('./kanban');
 
-const pageSize = 10;
-const teamPageSize = 25;
+const pageSize = 25;
 const short = (text, length) => String(text || '').slice(0, length);
 const button = (id, label, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
+const lists = {
+    find: { label: 'Find Work', empty: 'Nothing is open right now. Click **Add Task** to create a task.', hint: 'Choose a task to see its details and claim it.' },
+    mine: { label: 'My Tasks', empty: 'You have no tasks. Click **Find Work** to pick one up.', hint: 'Choose a task to mark it done or hand it back.' }
+};
 
-function buildBoardComponents(tagId = null) {
-    if (tagId) return [new ActionRowBuilder().addComponents(
-        button(`kanban:list:tag:0:${tagId}`, 'Open Tasks', ButtonStyle.Primary),
-        button('kanban:add', 'Add Task'),
-        button('kanban:list:mine:0', 'My Tasks'),
-        button('kanban:list:teams:0', 'Team Tasks'),
-        button('kanban:more', 'More')
-    )];
+function buildBoardComponents() {
     return [new ActionRowBuilder().addComponents(
-        button('kanban:add', 'Add Task', ButtonStyle.Primary),
-        button('kanban:list:ready:0', 'Ready Tasks', ButtonStyle.Success),
-        button('kanban:list:mine:0', 'My Tasks'),
-        button('kanban:list:teams:0', 'Team Tasks'),
-        button('kanban:more', 'More')
+        button('kanban:find:0', 'Find Work', ButtonStyle.Primary),
+        button('kanban:mine:0', 'My Tasks'),
+        button('kanban:add', 'Add Task', ButtonStyle.Success)
     )];
 }
 
-function buildMoreMenu(actor, content = '') {
-    const controls = [button('kanban:list:all:0', 'Browse Tasks')];
-    if (isManager(actor)) controls.push(button('kanban:import', 'Import Tasks'), button('kanban:teamsetup', 'Setup Teams'), button('kanban:refresh', 'Refresh Board'));
-    else controls.push(button('kanban:list:available:0', 'Available Tasks'), button('kanban:list:waiting:0', 'Waiting Tasks'));
-    controls.push(button('kanban:add', 'Add Task', ButtonStyle.Primary));
-    return {
-        content: `${content ? `${content}\n\n` : ''}**More task controls**\nWaiting tasks remain visible and claimable. Browse Tasks includes completed work.${isManager(actor) ? '\nManager controls: import a task list, set up team labels, refresh the live board, or delete tasks by tag.' : ''}`,
-        embeds: [], components: [new ActionRowBuilder().addComponents(controls), ...(isManager(actor) ? [new ActionRowBuilder().addComponents(button('kanban:list:available:0', 'Available Tasks'), button('kanban:list:waiting:0', 'Waiting Tasks'), button('kanban:deletetags:0', 'Delete Tag Tasks', ButtonStyle.Danger))] : [])], allowedMentions: { parse: [] }
-    };
+function filterTasks(tasks, list, actor) {
+    if (list === 'mine') return tasks.filter(task => task.userId === actor.author.id && getTaskStatus(task) !== 'done');
+    return tasks.filter(task => !task.userId && getTaskStatus(task) !== 'done');
 }
 
-function filterTasks(tasks, filter, actor, teamId = null) {
-    return tasks.filter(task => {
-        if (filter === 'waiting' || filter === 'blocked') return isWaiting(task, tasks);
-        if (filter === 'ready') return getTaskStatus(task) !== 'done';
-        if (filter === 'readyonly') return getTaskStatus(task) !== 'done' && !isWaiting(task, tasks);
-        if (filter === 'mine') return task.userId === actor.author.id && getTaskStatus(task) !== 'done';
-        if (filter === 'available') return !task.userId && !claimError(actor, task, tasks);
-        if (filter === 'teams') return getTaskStatus(task) !== 'done' && Boolean(getTaskTeam(task, actor)) && (!teamId || getTaskTeam(task, actor).id === teamId);
-        if (filter === 'tag') return getTaskTag(task).id === teamId;
-        return true;
-    });
-}
-
-function buildTaskPicker(tasks, filter, requestedPage = 0, actor = null, teamId = null) {
-    const allTasks = actor?.client?.taskStorage?.getAllTasks(actor.guild.id) || tasks;
-    if (filter === 'ready') tasks = [...tasks.filter(task => !isWaiting(task, allTasks)), ...tasks.filter(task => isWaiting(task, allTasks))];
+function buildTaskPicker(allTasks, list, requestedPage, actor) {
+    const tasks = sortBoardTasks(filterTasks(allTasks, list, actor));
     const pageCount = Math.max(1, Math.ceil(tasks.length / pageSize));
     const page = Math.max(0, Math.min(Number(requestedPage) || 0, pageCount - 1));
     const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
-    const team = listTaskTeams(tasks, actor).find(team => team.id === teamId);
-    const tag = tasks.length ? getTaskTag(tasks[0]) : null;
-    const labels = { ready: 'Ready Tasks', readyonly: 'Ready Only', waiting: 'Waiting Tasks', blocked: 'Waiting Tasks', available: 'Available Tasks', mine: 'My Tasks', all: 'All Tasks', teams: team ? `Team Tasks: ${escapeMarkdown(team.name)}` : 'Team Tasks', tag: tag ? `Tasks: ${escapeMarkdown(tag.name)}` : 'Tag Tasks' };
     const components = [];
     if (visible.length) {
-        const select = new StringSelectMenuBuilder()
+        components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
             .setCustomId('kanban:select')
-            .setPlaceholder('Choose a task to view or update it')
+            .setPlaceholder('Choose a task')
             .addOptions(visible.map(task => ({
-                label: short(`${getIssueKey(task) || task.id}: ${task.title}`, 100),
+                label: short(`${getIssueKey(task)}: ${task.title}`, 100),
                 value: String(task.id),
-                description: short(`${isWaiting(task, allTasks) ? 'Waiting · ' : 'Ready · '}${getTaskTeam(task, actor) ? `${getTaskTeam(task, actor).name} · ` : ''}${columns.find(c => c.id === getTaskStatus(task)).name} · ${priorities[getTaskPriority(task)].label} priority · ${task.userId ? 'Assigned' : 'Claimable'}`, 100)
-            })));
-        components.push(new ActionRowBuilder().addComponents(select));
+                description: short([getColumn(task).name, formatDue(task)].filter(Boolean).join(' · '), 100)
+            })))));
     }
     if (pageCount > 1) {
         components.push(new ActionRowBuilder().addComponents(
-            button(`kanban:page:${filter}:${page - 1}${teamId ? `:${teamId}` : ''}`, 'Previous').setDisabled(page === 0),
-            button(`kanban:page:${filter}:${page + 1}${teamId ? `:${teamId}` : ''}`, 'Next').setDisabled(page === pageCount - 1)
+            button(`kanban:${list}:${page - 1}`, 'Previous').setDisabled(page === 0),
+            button(`kanban:${list}:${page + 1}`, 'Next').setDisabled(page === pageCount - 1)
         ));
     }
-    components.push(new ActionRowBuilder().addComponents(
-        button('kanban:list:available:0', 'Available Tasks'),
-        button('kanban:list:mine:0', 'My Tasks'),
-        button('kanban:list:teams:0', 'Team Tasks'),
-        button('kanban:list:all:0', 'Browse Tasks'),
-        button('kanban:add', 'Add Task', ButtonStyle.Primary)
-    ));
-    components.push(new ActionRowBuilder().addComponents(button('kanban:more', 'More'), button(filter === 'readyonly' ? 'kanban:list:ready:0' : 'kanban:list:readyonly:0', filter === 'readyonly' ? 'Include Waiting' : 'Ready Only')));
-    const embeds = [];
-    if (visible.length) {
-        const partitions = filter === 'ready' ? [visible.filter(task => !isWaiting(task, allTasks)), visible.filter(task => isWaiting(task, allTasks))] : [visible];
-        for (const [index, group] of partitions.entries()) {
-            if (!group.length) continue;
-            const embed = new EmbedBuilder().setColor(filter === 'ready' && index === 1 ? 0x747f8d : 0x0052cc);
-            if (filter === 'ready') embed.setTitle(index === 1 ? '⏳ Waiting · still claimable' : '✅ Ready to work');
-            for (const task of group) embed.addFields({
-                name: `${short(getIssueKey(task) || task.id, 40)}: ${short(task.title, 200)}`,
-                value: short(`**Team:** ${short(escapeMarkdown(getTaskTeam(task, actor)?.name || 'No team'), 100)} · **Priority:** ${priorities[getTaskPriority(task)].label}\n**Status:** ${columns.find(column => column.id === getTaskStatus(task)).name} · **Due:** ${short(task.dueDate || 'None', 30)}${isWaiting(task, allTasks) ? `\n⏳ **Waiting on:** ${blockingSummary(task, allTasks, 100)}${isHardBlocked(task, allTasks) ? '\n🔒 Hard gate: Start Work and completion wait.' : ''}` : ''}`, 330)
-            });
-            embeds.push(embed);
-        }
-    }
+    components.push(...buildBoardComponents());
+    const { label, empty, hint } = lists[list];
     return {
-        content: `**${labels[filter] || labels.all}** — ${tasks.length} task(s)${pageCount > 1 ? ` · Page ${page + 1}/${pageCount}` : ''}${filter === 'ready' ? ` · ${tasks.filter(task => !isWaiting(task, allTasks)).length} ready · ${tasks.filter(task => isWaiting(task, allTasks)).length} waiting` : ''}\n${visible.length ? `Full task titles are listed below. Choose a task to read its description or update it.${filter === 'ready' ? ' Ready tasks come first; grey waiting cards can still be claimed.' : ''}` : filter === 'teams' ? 'No active tasks for this team.' : 'No tasks here yet.'}`,
-        embeds, components, allowedMentions: { parse: [] }
-    };
-}
-
-function buildTeamPicker(tasks, actor, requestedPage = 0) {
-    const teams = listTaskTeams(tasks, actor);
-    const pageCount = Math.max(1, Math.ceil(teams.length / teamPageSize));
-    const page = Math.max(0, Math.min(Number(requestedPage) || 0, pageCount - 1));
-    const components = [];
-    if (teams.length) components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
-        .setCustomId('kanban:teamview').setPlaceholder('Choose the team you want to see')
-        .addOptions(teams.slice(page * teamPageSize, (page + 1) * teamPageSize).map(team => ({
-            label: short(team.name, 100), value: team.id,
-            description: `${filterTasks(tasks, 'teams', actor, team.id).length} active task(s)`
-        })))));
-    if (pageCount > 1) components.push(new ActionRowBuilder().addComponents(
-        button(`kanban:teamlist:${page - 1}`, 'Previous').setDisabled(page === 0),
-        button(`kanban:teamlist:${page + 1}`, 'Next').setDisabled(page === pageCount - 1)
-    ));
-    components.push(new ActionRowBuilder().addComponents(
-        button('kanban:list:all:0', 'Browse Tasks'), button('kanban:add', 'Add Task', ButtonStyle.Primary),
-        button('kanban:more', 'More')
-    ));
-    return {
-        content: `**Team Tasks**${pageCount > 1 ? ` · Page ${page + 1}/${pageCount}` : ''}\n${teams.length ? 'Choose a group to see its active tasks. Anyone can view any team.' : 'No teams yet. A server manager can use Setup Teams to enter team names.'}`,
+        content: `**${label}** — ${tasks.length} task(s)${pageCount > 1 ? ` · page ${page + 1}/${pageCount}` : ''}\n${visible.length ? hint : empty}`,
         embeds: [], components, allowedMentions: { parse: [] }
     };
 }
 
-function buildIssueComponents(task, actor) {
+function buildTaskEmbed(task) {
+    const column = getColumn(task);
+    return new EmbedBuilder()
+        .setColor(column.id === 'done' ? 0x2e7d32 : 0x0052cc)
+        .setTitle(short(`${getIssueKey(task)}: ${task.title}`, 256))
+        .setDescription(short(task.description || 'No description.', 4000))
+        .addFields(
+            { name: 'Status', value: `${column.icon} ${column.name}`, inline: true },
+            { name: 'Owner', value: task.userId ? `<@${task.userId}>` : 'Nobody yet', inline: true },
+            { name: 'Due', value: formatDue(task) || 'No due date', inline: true }
+        );
+}
+
+function buildTaskComponents(task, actor) {
     const id = String(task.id);
-    const tasks = actor.client?.taskStorage?.getAllTasks(actor.guild.id) || [task];
-    const blocked = isHardBlocked(task, tasks);
+    const status = getTaskStatus(task);
     const controls = [];
-    if (!claimError(actor, task)) {
-        if (!task.userId) controls.push(button(`kanban:claim:${id}`, 'Claim', ButtonStyle.Success));
-        if (getTaskStatus(task) !== 'progress') controls.push(button(`kanban:start:${id}`, 'Start Work', ButtonStyle.Primary).setDisabled(blocked));
+    if (status !== 'done' && task.userId !== actor.author.id && !claimError(actor, task)) controls.push(button(`kanban:claim:${id}`, 'Claim', ButtonStyle.Success));
+    if (canChange(actor, task)) {
+        if (status !== 'done') controls.push(button(`kanban:done:${id}`, 'Mark Done', ButtonStyle.Success));
+        if (status !== 'done' && task.userId) controls.push(button(`kanban:unclaim:${id}`, 'Unclaim'));
+        if (status === 'done') controls.push(button(`kanban:reopen:${id}`, 'Reopen'));
+        controls.push(button(`kanban:edit:${id}`, 'Edit'), button(`kanban:delete:${id}`, 'Delete', ButtonStyle.Danger));
     }
-    if (task.userId && !releaseError(actor, task)) controls.push(button(`kanban:release:${id}`, 'Release'));
-    if (userCanManageIssue(actor, task)) controls.push(button(`kanban:edit:${id}`, 'Edit Task', ButtonStyle.Primary), button(`kanban:delete:${id}`, 'Delete Task', ButtonStyle.Danger));
-    const components = [];
-    if (controls.length) components.push(new ActionRowBuilder().addComponents(controls));
-    components.push(new ActionRowBuilder().addComponents(button(`kanban:details:${id}`, 'Refresh'), button('kanban:list:mine:0', 'My Tasks')));
-    if (userCanManageIssue(actor, task)) {
-        components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
-            .setCustomId(`kanban:status:${id}`)
-            .setPlaceholder(blocked ? 'Hard gate: prerequisites unfinished' : 'Change task status')
-            .addOptions(columns.filter(column => !blocked || column.id === 'todo').map(column => ({ label: column.name, value: column.id, emoji: column.icon, default: column.id === getTaskStatus(task) })))));
-        const teams = getConfiguredTeams(actor);
-        if (teams.length || getTaskTeam(task, actor)) {
-            const teamId = getTaskTeam(task, actor)?.id;
-            components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
-                .setCustomId(`kanban:team:${id}`)
-                .setPlaceholder('Change team tag')
-                .addOptions([
-                    { label: 'No team', value: 'none', default: !teamId },
-                    ...teams.map(team => ({ label: short(team.name, 100), value: team.id, default: team.id === teamId }))
-                ])));
-        }
-    }
-    return components;
+    const rows = [];
+    if (controls.length) rows.push(new ActionRowBuilder().addComponents(controls));
+    rows.push(new ActionRowBuilder().addComponents(button('kanban:find:0', 'Find Work'), button('kanban:mine:0', 'My Tasks')));
+    return rows;
 }
 
-function buildAddModal(teams = []) {
-    const fields = [
-        ['title', 'Task title (optional [TAG] prefix)', TextInputStyle.Short, true, 200, '[POWER] Check the battery pack'],
-        ['description', 'Description', TextInputStyle.Paragraph, false, 2000, 'Add context, links, or acceptance criteria'],
-        ['priority', 'Priority (low, medium, high, urgent)', TextInputStyle.Short, false, 20, 'medium'],
-        ['due', 'Due date (YYYY-MM-DD)', TextInputStyle.Short, false, 10, '2026-12-01']
-    ];
-    const modal = new ModalBuilder().setCustomId('kanban:create').setTitle('Add an available task').addLabelComponents(fields.map(([id, label, style, required, maxLength, placeholder]) =>
-        new LabelBuilder().setLabel(label).setTextInputComponent(new TextInputBuilder().setCustomId(id).setStyle(style).setRequired(required).setMaxLength(maxLength).setPlaceholder(placeholder))
-    ));
-    if (teams.length) {
-        modal.addLabelComponents(new LabelBuilder().setLabel('Team').setDescription('Who is this task for?').setStringSelectMenuComponent(new StringSelectMenuBuilder()
-            .setCustomId('team').setRequired(false).setPlaceholder('Choose a team (optional)')
-            // This SDK version validates modal option labels at 45 characters.
-            // Keep longer team names visible in the option's description.
-            .addOptions([{ label: 'No team', value: 'none', default: true }, ...teams.map(team => ({ label: short(team.name, 45), value: team.id, ...(team.name.length > 45 ? { description: team.name } : {}) }))])));
-    }
-    return modal;
+function buildTaskView(task, actor, content = '') {
+    return { content, embeds: [buildTaskEmbed(task)], components: buildTaskComponents(task, actor), allowedMentions: { parse: [] } };
 }
 
-function buildEditModal(task, draftId, tasks = []) {
-    const fields = [
-        ['title', 'Task title', TextInputStyle.Short, true, task.title || '', 200],
-        ['description', 'Description', TextInputStyle.Paragraph, false, task.description || '', 2000],
-        ['priority', 'Priority (low, medium, high, urgent)', TextInputStyle.Short, false, getTaskPriority(task), 20],
-        ['due', 'Due date (YYYY-MM-DD; blank clears)', TextInputStyle.Short, false, task.dueDate || '', 10],
-        ['dependencies', 'Waiting on (prefix ! for a hard gate)', TextInputStyle.Short, false, dependencyInput(task, tasks), 2000]
-    ];
-    return new ModalBuilder().setCustomId(`kanban:editsave:${draftId}`).setTitle('Edit task details')
-        .addLabelComponents(fields.map(([id, label, style, required, value, maxLength]) => {
-            const input = new TextInputBuilder().setCustomId(id).setStyle(style).setRequired(required).setMaxLength(Math.max(maxLength, value.length));
-            if (value) input.setValue(value);
-            const field = new LabelBuilder().setLabel(label).setTextInputComponent(input);
-            if (id === 'dependencies') { input.setPlaceholder('URC-12, [POWER], !URC-3'); field.setDescription('Soft links are reminders. Managers use ! to gate Start Work and completion. Claims stay allowed.'); }
-            return field;
-        }));
-}
-
-function buildTeamSetup(actor, content = '') {
-    const teams = getConfiguredTeams(actor);
-    const summary = teams.map(team => escapeMarkdown(team.name)).join(', ');
+function buildDeleteConfirm(task) {
     return {
-        content: `${content ? `${content}\n\n` : ''}**Setup Teams**\nClick **Edit Teams** and enter one group name per line (up to ${maxTeams}). Teams are labels that tell people who the task is meant for. Anyone can browse them using **Team Tasks**.\nCurrent teams: ${teams.length ? `${short(summary, 1200)}${summary.length > 1200 ? '…' : ''}` : 'None yet.'}\nExisting task labels are kept when you change this setup.`,
+        content: `Delete **${escapeMarkdown(short(`${getIssueKey(task)}: ${task.title}`, 300))}**? This cannot be undone.`,
         embeds: [],
         components: [new ActionRowBuilder().addComponents(
-            button('kanban:teamsetup:edit', 'Edit Teams', ButtonStyle.Primary),
-            button('kanban:teamsetup:clear', 'Clear Team Setup'),
-            button('kanban:list:teams:0', 'Team Tasks'),
-            button('kanban:add', 'Add Task', ButtonStyle.Primary)
+            button(`kanban:deleteconfirm:${task.id}`, 'Delete permanently', ButtonStyle.Danger),
+            button(`kanban:view:${task.id}`, 'Cancel')
         )],
         allowedMentions: { parse: [] }
     };
 }
 
-function buildTeamSetupModal(actor) {
-    const names = getConfiguredTeams(actor).map(team => team.name.slice(0, maxTeamNameLength)).join('\n');
-    const input = new TextInputBuilder().setCustomId('names').setStyle(TextInputStyle.Paragraph)
-        .setRequired(false).setMaxLength(maxTeams * (maxTeamNameLength + 1))
-        .setPlaceholder('Avionics\nSoftware\nMechanical');
-    if (names) input.setValue(names);
-    return new ModalBuilder().setCustomId('kanban:teamsetup:save').setTitle('Set up team labels')
-        .addLabelComponents(new LabelBuilder().setLabel('Team names (one per line)').setTextInputComponent(input));
+function textInput(id, label, { style = TextInputStyle.Short, required = false, maxLength, value = '', placeholder }) {
+    const input = new TextInputBuilder().setCustomId(id).setStyle(style).setRequired(required).setMaxLength(Math.max(maxLength, value.length));
+    if (value) input.setValue(value);
+    if (placeholder) input.setPlaceholder(placeholder);
+    return new LabelBuilder().setLabel(label).setTextInputComponent(input);
 }
 
-function buildImportModal() {
-    return new ModalBuilder().setCustomId('kanban:importpreview').setTitle('Import a task list').addLabelComponents(
-        new LabelBuilder().setLabel('Paste a short list').setDescription('Use Title, Description, Priority, Due date, and Team fields.')
-            .setTextInputComponent(new TextInputBuilder().setCustomId('list').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(4000)
-                .setPlaceholder('Title: Build payload\nDescription:\nPriority: high\nDue date: 2026-10-20\nTeam: Cubesat')),
-        new LabelBuilder().setLabel('Or upload the full list').setDescription('A UTF-8 .txt or .md file, up to 256 KiB and 250 tasks. You will review a preview first.')
-            .setFileUploadComponent(new FileUploadBuilder().setCustomId('file').setRequired(false).setMinValues(0).setMaxValues(1))
-    );
+// Add and Edit share one short form: title, optional description, optional due date.
+function buildTaskModal(task = null) {
+    return new ModalBuilder()
+        .setCustomId(task ? `kanban:editsave:${task.id}` : 'kanban:create')
+        .setTitle(task ? 'Edit task' : 'Add a task')
+        .addLabelComponents(
+            textInput('title', 'Title', { required: true, maxLength: 200, value: task?.title || '', placeholder: '[POWER] Check the battery pack' }),
+            textInput('description', 'Description (optional)', { style: TextInputStyle.Paragraph, maxLength: 2000, value: task?.description || '' }),
+            textInput('due', 'Due date (optional, YYYY-MM-DD)', { maxLength: 10, value: task?.dueDate || '', placeholder: '2026-12-01' })
+        );
 }
 
-module.exports = { buildBoardComponents, buildMoreMenu, buildTaskPicker, buildTeamPicker, buildIssueComponents, buildAddModal, buildEditModal, buildTeamSetup, buildTeamSetupModal, buildImportModal, filterTasks, pageSize };
+module.exports = { buildBoardComponents, filterTasks, buildTaskPicker, buildTaskView, buildDeleteConfirm, buildTaskModal, pageSize };

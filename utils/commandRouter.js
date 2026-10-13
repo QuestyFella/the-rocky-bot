@@ -4,39 +4,9 @@ const { Collection } = require('discord.js');
 
 const taskPrefix = '!task';
 const kanbanSubcommands = new Set([
-    'add',
-    'assign',
-    'board',
-    'claim',
-    'available',
-    'mine',
-    'myteams',
-    'teamtasks',
-    'team',
-    'release',
-    'unclaim',
-    'start',
-    'commands',
-    'close',
-    'delete',
-    'details',
-    'done',
-    'due',
-    'duedate',
-    'edit',
-    'jira',
-    'kanban',
-    'list',
-    'move',
-    'priority',
-    'refresh',
-    'remove',
-    'rename',
-    'reopen',
-    'setup',
-    'show',
-    'status',
-    'view'
+    'board', 'show', 'list', 'kanban', 'jira', 'setup', 'refresh', 'find', 'mine',
+    'add', 'claim', 'start', 'done', 'close', 'unclaim', 'release', 'reopen',
+    'details', 'view', 'edit', 'rename', 'due', 'duedate', 'assign', 'delete', 'remove', 'commands'
 ]);
 
 function isPrefixCommand(content, prefix) {

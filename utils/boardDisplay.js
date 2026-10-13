@@ -1,104 +1,56 @@
 const { EmbedBuilder, escapeMarkdown } = require('discord.js');
-const { columns, priorities, getTaskStatus, getTaskPriority, getIssueKey, sortBoardTasks } = require('./kanban');
-const { getTaskTeam } = require('./teams');
+const { columns, getTaskStatus, getIssueKey, sortBoardTasks, formatDue } = require('./kanban');
 const { getTaskTag, groupTasksByTag } = require('./taskTags');
 const { buildBoardComponents } = require('./boardComponents');
-const { isWaiting, isHardBlocked, blockingSummary } = require('./taskDependencies');
 
 const blue = 0x0052cc;
-const dueFormat = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+const descriptionLimit = 4000;
 
-function splitText(text, limit = 1024) {
-    const parts = [];
-    let part = '';
-    for (const character of text) {
-        if (part.length + character.length > limit) { parts.push(part); part = ''; }
-        part += character;
-    }
-    if (part) parts.push(part);
-    return parts;
-}
-
-function statusCounts(tasks) {
-    return columns.map(column => ({ ...column, count: tasks.filter(task => getTaskStatus(task) === column.id).length }));
-}
-
-function taskFields(task, displayIndex, actor, showTeam, tasks) {
+function taskLine(task, { showTag = false } = {}) {
     const tag = getTaskTag(task);
-    const key = `\`${String(getIssueKey(task) || `#${displayIndex + 1}`).replace(/`/g, '').slice(0, 100)}\``;
-    const title = escapeMarkdown(tag.title);
-    const status = columns.find(column => column.id === getTaskStatus(task));
-    const priority = priorities[getTaskPriority(task)];
-    const date = task.dueDate ? new Date(`${task.dueDate}T00:00:00Z`) : null;
-    const due = date && !Number.isNaN(date.getTime()) ? dueFormat.format(date) : task.dueDate || 'No due date';
-    const owner = task.userId ? `<@${task.userId}>` : task.assignedToRole ? `<@&${task.assignedToRole}>` : getTaskStatus(task) === 'done' ? 'Unassigned' : 'Available to claim';
-    const team = getTaskTeam(task, actor)?.name || 'No team';
-    const waiting = isWaiting(task, tasks);
-    const details = `${status.icon} **${status.name}** · ${priority.icon} ${priority.label} · 📅 ${escapeMarkdown(due)}\n👤 ${owner}${showTeam ? ` · Team: ${escapeMarkdown(team)}` : ''}${waiting ? `\n⏳ **Waiting on:** ${blockingSummary(task, tasks, 500)}${isHardBlocked(task, tasks) ? '\n🔒 Hard gate: claim now; Start Work and completion wait.' : ''}` : ''}`;
-    const name = `${key} · ${title}`;
-    const values = splitText(name.length <= 256 ? details : `**${title}**\n${details}`);
-    return values.map((value, index) => ({ name: index ? 'Task continued' : name.length <= 256 ? name : key, value, inline: false }));
+    const title = escapeMarkdown(showTag ? task.title : tag.title).slice(0, 200);
+    const owner = task.userId ? ` — <@${task.userId}>` : '';
+    const due = formatDue(task);
+    return `\`${getIssueKey(task).replace(/`/g, '')}\` ${title}${owner}${due ? ` · ${due}` : ''}`;
 }
 
-function packFields(fields, overhead, maxFields, extraPerField = 0) {
-    const pages = [[]];
-    let length = overhead;
-    for (const field of fields) {
-        const size = field.name.length + field.value.length + extraPerField;
-        if (pages.at(-1).length >= maxFields || length + size > 5600) { pages.push([]); length = overhead; }
-        pages.at(-1).push(field);
-        length += size;
-    }
-    return pages;
-}
-
-function renderBoard(tasks, title, actor) {
-    const visibleTasks = tasks;
-    const groups = groupTasksByTag(visibleTasks);
-    const displayTasks = sortBoardTasks(tasks);
-    const indexes = new Map(displayTasks.map((task, index) => [task.id, index]));
-    const result = [];
-    if (groups.length > 1) {
-        const active = tasks.filter(task => getTaskStatus(task) !== 'done');
-        const waiting = active.filter(task => isWaiting(task, tasks)).length;
-        const description = `**${visibleTasks.length} tasks · ${groups.length} tags**\n${statusCounts(visibleTasks).map(column => `${column.icon} ${column.name}: **${column.count}**`).join(' · ')}\n✅ **${active.length - waiting} ready** · ⏳ **${waiting} waiting**\n\nJump to a tag below. Use **Ready Tasks** to find work or **My Tasks** for your assignments. Waiting tasks remain visible and claimable.`;
-        const fields = groups.map(group => ({ name: escapeMarkdown(group.name), value: `${group.tasks.length} tasks · ${group.tasks.filter(task => getTaskStatus(task) === 'done').length} done`, inline: true }));
-        const pages = packFields(fields, title.length + description.length + 200, 25, 160);
-        let offset = 0;
-        for (const [index, page] of pages.entries()) {
-            result.push({
-                sectionKey: `overview:${index}`, indexTags: groups.slice(offset, offset + page.length).map(group => group.id),
-                content: '', embeds: [new EmbedBuilder().setColor(blue).setTitle(`${title.slice(0, 200)} · Overview${pages.length > 1 ? ` ${index + 1}/${pages.length}` : ''}`)
-                    .setDescription(description).addFields(page).setFooter({ text: 'Tags come from [TAG] at the start of a task title.' })],
-                components: buildBoardComponents(), allowedMentions: { parse: [] }
-            });
-            offset += page.length;
+// Done tasks are only counted, so the board stays focused on open work.
+function boardLines(tasks) {
+    const counts = columns.map(column => `${column.icon} ${column.name}: **${tasks.filter(task => getTaskStatus(task) === column.id).length}**`).join(' · ');
+    const lines = [
+        counts,
+        '**Want to help?** Click **Find Work**, pick a task, then **Claim**. Finished? Open **My Tasks** and click **Mark Done**.'
+    ];
+    const doing = sortBoardTasks(tasks.filter(task => getTaskStatus(task) === 'progress'));
+    const todo = tasks.filter(task => getTaskStatus(task) === 'todo');
+    if (doing.length) lines.push('', '**🔧 In Progress**', ...doing.map(task => taskLine(task, { showTag: true })));
+    if (todo.length) {
+        lines.push('', '**📥 To Do**');
+        const groups = groupTasksByTag(todo);
+        for (const group of groups) {
+            if (groups.length > 1 || group.name !== 'General') lines.push(`__${escapeMarkdown(group.name)}__`);
+            lines.push(...sortBoardTasks(group.tasks).map(task => taskLine(task)));
         }
     }
-    if (!groups.length) return [{
-        sectionKey: 'empty', content: '', embeds: [new EmbedBuilder().setColor(blue).setTitle(title.slice(0, 220))
-            .setDescription('No tasks yet. Click **Add Task** to get started. Use a title like **[POWER] Check the battery pack** to group related work.')
-            .setFooter({ text: 'Everyone can add a task. Team labels are optional.' })],
-        components: buildBoardComponents(), allowedMentions: { parse: [] }
-    }];
-    for (const group of groups) {
-        const ordered = sortBoardTasks(group.tasks);
-        const teams = [...new Set(group.tasks.map(task => getTaskTeam(task, actor)?.name || 'No team'))];
-        const counts = statusCounts(group.tasks);
-        const done = counts.find(column => column.id === 'done').count;
-        const waiting = group.tasks.filter(task => isWaiting(task, tasks)).length;
-        const description = `**${group.tasks.length} tasks · ${done}/${group.tasks.length} done · ${waiting} waiting**\n${teams.length === 1 ? `Team: **${escapeMarkdown(teams[0])}**` : 'Teams shown on each task.'}`;
-        const fields = ordered.flatMap(task => taskFields(task, indexes.get(task.id), actor, teams.length > 1, tasks));
-        const pages = packFields(fields, group.name.length + description.length + 200, 10);
-        for (const [index, page] of pages.entries()) result.push({
-            sectionKey: `tag:${group.id}:${index}`, tagId: group.id,
-            content: '', embeds: [new EmbedBuilder().setColor(done === group.tasks.length ? 0x2e7d32 : blue)
-                .setTitle(`${group.name}${pages.length > 1 ? ` · ${index + 1}/${pages.length}` : ''}`)
-                .setDescription(description).addFields(page).setFooter({ text: 'Open Tasks → choose a task → Claim, Start Work, or Edit Task' })],
-            components: buildBoardComponents(group.id), allowedMentions: { parse: [] }
-        });
-    }
-    return result;
+    if (!doing.length && !todo.length) lines.push('', 'No open tasks. Click **Add Task** to create one.');
+    return lines;
 }
 
-module.exports = { renderBoard };
+function renderBoard(tasks, title) {
+    const parts = [''];
+    for (const line of boardLines(tasks)) {
+        const next = parts.at(-1) ? `${parts.at(-1)}\n${line}` : line;
+        if (next.length > descriptionLimit && parts.at(-1)) parts.push(line);
+        else parts[parts.length - 1] = next;
+    }
+    return parts.map((description, index) => ({
+        content: '',
+        embeds: [new EmbedBuilder().setColor(blue)
+            .setTitle(`${title.slice(0, 200)}${parts.length > 1 ? ` (${index + 1}/${parts.length})` : ''}`)
+            .setDescription(description || '​')],
+        components: buildBoardComponents(),
+        allowedMentions: { parse: [] }
+    }));
+}
+
+module.exports = { renderBoard, taskLine };
