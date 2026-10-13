@@ -315,7 +315,7 @@ test('blocked tasks stay hidden until same-category blockers are done; other cat
     assert.ok((await options()).includes('b'));
 });
 
-test('managers can turn a "How this board works" notice on and off for each board', async () => {
+test('managers can turn a notice on and off for each board, and write their own', async () => {
     const f = fixture();
     const channel = id => ({ id, send: async () => ({ id: `${id}-m`, author: { id: 'bot' }, edit: async () => {} }), messages: { fetch: async () => { throw Object.assign(new Error('Unknown'), { code: 10008 }); } } });
     f.client.user = { id: 'bot' };
@@ -339,7 +339,24 @@ test('managers can turn a "How this board works" notice on and off for each boar
     await board.execute(message('main-channel'), ['notice', 'off']);
     assert.equal(titles()[0], '🚀 Rocket Club Task Board');
     await board.execute(message('main-channel'), ['notice']);
-    assert.match(replies.at(-1), /Usage: `!task notice on\|off`/);
+    assert.match(replies.at(-1), /The notice is \*\*off\*\*/);
+
+    const content = '!task notice set # Welcome to GameDev\nPick a task with **Find Work**.\nQuestions? Ask a lead.';
+    await board.execute({ ...message('main-channel'), content }, ['notice', 'set', '#', 'Welcome']);
+    const cards = () => board.generateBoardMessages(f.client, f.guild.id)[0].embeds.map(e => e.toJSON());
+    assert.equal(cards()[0].title, '📌 Welcome to GameDev');
+    assert.equal(cards()[0].description, 'Pick a task with **Find Work**.\nQuestions? Ask a lead.');
+    assert.match(cards()[1].description, /Want to help\?/, 'a server\'s own notice keeps the short how-to');
+    await board.execute(message('main-channel'), ['notice', 'off']);
+    await board.execute(message('main-channel'), ['notice', 'on']);
+    assert.equal(cards()[0].title, '📌 Welcome to GameDev', 'turning it back on keeps the server\'s text');
+    await board.execute({ ...message('main-channel'), content: '!task notice set Just one line' }, ['notice', 'set', 'Just', 'one', 'line']);
+    assert.deepEqual([cards()[0].title, cards()[0].description], ['📌 Notice', 'Just one line']);
+    await board.execute(message('main-channel'), ['notice', 'default']);
+    assert.equal(cards()[0].title, '📌 How this board works');
+    assert.match(cards()[0].description, /or ask an exec\.$/);
+    await board.execute({ ...message('main-channel'), content: '!task notice set' }, ['notice', 'set']);
+    assert.match(replies.at(-1), /Write the notice after the command/);
 });
 
 test('the exec board keeps its tasks separate from the main board', async () => {

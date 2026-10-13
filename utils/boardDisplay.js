@@ -40,7 +40,8 @@ function sectionCards({ title, description, color, fields }) {
 }
 
 // An optional card at the top that explains the board to new members; managers turn it on with !task notice on.
-const noticeCard = {
+// A server can replace it with its own text (!task notice set); a first line starting with "# " becomes the title.
+const defaultNotice = {
     title: '📌 How this board works',
     description: [
         '**1. Find something to do.** Click **Find Work** below. Use the category menu to see only your area, then pick a task to read what it involves.',
@@ -57,19 +58,27 @@ const noticeCard = {
 
 // The board is an optional notice, a header card, an In Progress card, then one card per category with the
 // tasks people can claim now. Done tasks are only counted, and locked tasks only counted per category.
+function noticeCard(text) {
+    if (!text) return defaultNotice;
+    const [first, ...rest] = text.split('\n');
+    const heading = first.match(/^#\s+(.+)/);
+    return { title: `📌 ${heading ? heading[1].trim() : 'Notice'}`.slice(0, 256), description: (heading ? rest.join('\n').trim() : text) || '​', color: grey, fields: [] };
+}
+
+// notice is false (no notice), true (the built-in notice), or a server's own notice text.
 function boardCards(tasks, title, { notice = false } = {}) {
     const doing = sortBoardTasks(tasks.filter(task => getTaskStatus(task) === 'progress'));
     const todo = tasks.filter(task => getTaskStatus(task) === 'todo');
     const locked = todo.filter(task => isLocked(task, tasks)).length;
     const done = tasks.filter(task => getTaskStatus(task) === 'done').length;
     const counts = [`📥 **${todo.length - locked}** ready to claim`, `🔧 **${doing.length}** in progress`, locked ? `🔒 **${locked}** waiting` : null, `✅ **${done}** done`];
-    const cards = notice ? [noticeCard] : [];
+    const cards = notice ? [noticeCard(notice === true ? null : notice)] : [];
     cards.push({
         title: `🚀 ${title}`.slice(0, 256),
         description: [
             counts.filter(Boolean).join('  ·  '),
-            // The notice already explains how to use the board.
-            ...(notice ? [] : ['', '**Want to help?** Click **Find Work**, pick a task, then **Claim** it.', '**Finished?** Open **My Tasks** and click **Mark Done**.']),
+            // The built-in notice already explains how to use the board; a server's own notice may not.
+            ...(notice === true ? [] : ['', '**Want to help?** Click **Find Work**, pick a task, then **Claim** it.', '**Finished?** Open **My Tasks** and click **Mark Done**.']),
             ...(!doing.length && !todo.length ? ['', 'No open tasks. Click **Add Task** to create one.'] : [])
         ].join('\n'),
         color: blue,
