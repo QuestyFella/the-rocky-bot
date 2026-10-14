@@ -5,7 +5,7 @@ const { buildBoardComponents, buildTaskPicker, buildTaskView, buildDeleteConfirm
 const { getIssueKey, parseDueDate, canChange } = require('./kanban');
 const { getImportDraft, commitImport } = require('./taskImport');
 
-const cannotChange = 'Only the person working on this task, its creator, or a manager can change it.';
+const cannotChange = 'Only the people working on this task, its creator, or a manager can change it.';
 const taskActions = new Set(['select', 'view', 'delete', 'deleteconfirm', 'editsave', ...Object.keys(board.taskCommands)]);
 
 function readTaskForm(fields) {
@@ -135,7 +135,7 @@ async function handleBoardInteraction(interaction) {
             content = storage.updateTask(interaction.guildId, task.id, task) ? 'Saved.' : 'Failed to save the task.';
         }
     } else {
-        // No awaits between reading, checking, and saving, so two quick claims cannot both win.
+        // No awaits between reading, checking, and saving, so two quick clicks cannot undo each other.
         const { check, apply } = board.taskCommands[action];
         content = check(actor, task, boardTasks());
         if (!content) {

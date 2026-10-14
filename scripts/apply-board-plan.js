@@ -44,7 +44,7 @@ function applyPlan(tasks, plan, { projectKey = 'TASK', nextIssueNumber = 1, now 
             if (byRef.has(ref)) { errors.push(`${label}: this name is already used.`); continue; }
             task = {
                 id: randomUUID(), issueKey: `${projectKey}-${nextIssueNumber++}`, title: '', description: '', dueDate: null,
-                status: 'todo', completed: false, createdAt: now, updatedAt: now, userId: null, createdBy: null
+                status: 'todo', completed: false, createdAt: now, updatedAt: now, userIds: [], createdBy: null
             };
             byRef.set(ref, task);
             next.push(task);

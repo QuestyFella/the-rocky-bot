@@ -2,15 +2,17 @@ const {
     ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
     ModalBuilder, TextInputBuilder, TextInputStyle, LabelBuilder, EmbedBuilder, escapeMarkdown
 } = require('discord.js');
-const { getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, clipText, getSummary, getBlockers, isLocked, canChange, claimError } = require('./kanban');
+const { getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, clipText, getSummary, getBlockers, isLocked, canChange, claimError, getOwners, isOwner } = require('./kanban');
 const { getTaskTag, getTagStyle } = require('./taskTags');
 
 const pageSize = 25;
 const short = (text, length) => String(text || '').slice(0, length);
 
-// Dropdown line under each task: its status (in My Tasks), due date, then the start of its summary.
+// Dropdown line under each task: its status (in My Tasks) or how many people are on it (in Find Work),
+// its due date, then the start of its summary.
 function optionLine(task, list) {
-    const facts = [list === 'mine' ? getColumn(task).name : null, formatDue(task)].filter(Boolean).join(' · ');
+    const working = getOwners(task).length;
+    const facts = [list === 'mine' ? getColumn(task).name : working ? `${working} working on it` : null, formatDue(task)].filter(Boolean).join(' · ');
     const room = 100 - (facts ? facts.length + 3 : 0);
     const text = getSummary(task) && room > 20 ? clipText(getSummary(task), room) : '';
     return [facts, text].filter(Boolean).join(' · ') || getColumn(task).name;
@@ -30,8 +32,9 @@ function buildBoardComponents() {
 }
 
 function filterTasks(tasks, list, actor) {
-    if (list === 'mine') return tasks.filter(task => task.userId === actor.author.id && getTaskStatus(task) !== 'done');
-    return tasks.filter(task => !task.userId && getTaskStatus(task) !== 'done' && !isLocked(task, tasks));
+    if (list === 'mine') return tasks.filter(task => isOwner(task, actor.author.id) && getTaskStatus(task) !== 'done');
+    // Tasks other people are already on stay in Find Work, so more people can join them.
+    return tasks.filter(task => !isOwner(task, actor.author.id) && getTaskStatus(task) !== 'done' && !isLocked(task, tasks));
 }
 
 // Find Work can be narrowed to one category; "all" (the default) shows every category.
@@ -110,7 +113,7 @@ function buildTaskEmbed(task, tasks) {
         .setDescription(short(taskDescription(task), 4000))
         .addFields(
             { name: 'Status', value: `${column.icon} ${column.name}`, inline: true },
-            { name: 'Owner', value: task.userId ? `<@${task.userId}>` : 'Nobody yet', inline: true },
+            { name: 'Working on it', value: short(getOwners(task).map(id => `<@${id}>`).join(', '), 1024) || 'Nobody yet', inline: true },
             { name: 'Due', value: formatDue(task) || 'No due date', inline: true }
         );
     if (blockers.length) embed.addFields({ name: isLocked(task, tasks) ? '🔒 Locked until done' : 'Waiting on', value: short(blockers.map(other => `${getIssueKey(other)}: ${other.title}`).join('\n'), 1024) });
@@ -121,10 +124,11 @@ function buildTaskComponents(task, actor, tasks) {
     const id = String(task.id);
     const status = getTaskStatus(task);
     const controls = [];
-    if (status !== 'done' && task.userId !== actor.author.id && !claimError(actor, task, tasks)) controls.push(button(`kanban:claim:${id}`, 'Claim', ButtonStyle.Success));
+    const owners = getOwners(task);
+    if (!claimError(actor, task, tasks)) controls.push(button(`kanban:claim:${id}`, owners.length ? 'Join' : 'Claim', ButtonStyle.Success));
     if (canChange(actor, task)) {
         if (status !== 'done') controls.push(button(`kanban:done:${id}`, 'Mark Done', ButtonStyle.Success));
-        if (status !== 'done' && task.userId) controls.push(button(`kanban:unclaim:${id}`, 'Unclaim'));
+        if (status !== 'done' && owners.length) controls.push(button(`kanban:unclaim:${id}`, isOwner(task, actor.author.id) ? 'Unclaim' : 'Unclaim everyone'));
         if (status === 'done') controls.push(button(`kanban:reopen:${id}`, 'Reopen'));
         controls.push(button(`kanban:edit:${id}`, 'Edit'), button(`kanban:delete:${id}`, 'Delete', ButtonStyle.Danger));
     }

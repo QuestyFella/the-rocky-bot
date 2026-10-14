@@ -147,7 +147,7 @@ test('a member can find, claim, finish, and reopen a task with buttons', async (
     const view = await interact(f, 'kanban:select', { type: 'select', values: ['task-1'] });
     assert.deepEqual(labels(view.payload), ['Claim', 'Find Work', 'My Tasks']);
     const claimed = await interact(f, 'kanban:claim:task-1');
-    assert.equal(f.task().userId, 'alice');
+    assert.deepEqual(f.task().userIds, ['alice']);
     assert.equal(getTaskStatus(f.task()), 'progress');
     assert.deepEqual(labels(claimed.payload), ['Mark Done', 'Unclaim', 'Edit', 'Delete', 'Find Work', 'My Tasks']);
     const mine = await interact(f, 'kanban:mine:0');
@@ -157,7 +157,7 @@ test('a member can find, claim, finish, and reopen a task with buttons', async (
     await interact(f, 'kanban:reopen:task-1');
     assert.equal(getTaskStatus(f.task()), 'progress');
     await interact(f, 'kanban:unclaim:task-1');
-    assert.equal(f.task().userId, null);
+    assert.deepEqual(f.task().userIds, []);
     assert.equal(getTaskStatus(f.task()), 'todo');
 });
 
@@ -188,16 +188,40 @@ test('Find Work pages through every open task without duplicate button IDs', asy
     assert.match((await interact(f, 'kanban:find:1:page')).payload.content, /page 2\/3/);
 });
 
-test('a claimed task cannot be taken or changed by someone else; managers can', async () => {
+test('several people can claim one task, and each unclaims only themselves', async () => {
     const f = fixture();
     await interact(f, 'kanban:claim:task-1', { userId: 'alice' });
-    const stolen = await interact(f, 'kanban:claim:task-1', { userId: 'carol' });
-    assert.match(stolen.payload.content, /already working/);
-    assert.deepEqual(labels(stolen.payload), ['Find Work', 'My Tasks']);
-    await interact(f, 'kanban:done:task-1', { userId: 'carol' });
+    assert.match((await interact(f, 'kanban:find:0', { userId: 'alice' })).payload.content, /Find Work\*\* — 0 task/);
+    const found = await interact(f, 'kanban:find:0', { userId: 'carol' });
+    assert.match(taskOptions(found.payload)[0].description, /^1 working on it · Details/);
+    assert.deepEqual(labels((await interact(f, 'kanban:view:task-1', { userId: 'carol' })).payload), ['Join', 'Find Work', 'My Tasks']);
+    const joined = await interact(f, 'kanban:claim:task-1', { userId: 'carol' });
+    assert.match(joined.payload.content, /You joined RC-1\. 1 other is working on it too/);
+    assert.deepEqual(labels(joined.payload), ['Mark Done', 'Unclaim', 'Edit', 'Delete', 'Find Work', 'My Tasks']);
+    assert.deepEqual(f.task().userIds, ['alice', 'carol']);
+    assert.match((await interact(f, 'kanban:claim:task-1', { userId: 'carol' })).payload.content, /already working/);
+    assert.deepEqual(f.task().userIds, ['alice', 'carol']);
+    assert.match(boardText(renderBoard([f.task()], 'Board')), /RC-1 · ⚡ Check battery\nDetails\n👥 <@alice>, <@carol>/);
+    assert.match((await interact(f, 'kanban:unclaim:task-1', { userId: 'alice' })).payload.content, /You left RC-1\. The others are still on it/);
+    assert.deepEqual(f.task().userIds, ['carol']);
     assert.equal(getTaskStatus(f.task()), 'progress');
-    await interact(f, 'kanban:done:task-1', { userId: 'carol', manager: true });
+    await interact(f, 'kanban:done:task-1', { userId: 'dave' });
+    assert.equal(getTaskStatus(f.task()), 'progress');
+    await interact(f, 'kanban:done:task-1', { userId: 'carol' });
     assert.equal(getTaskStatus(f.task()), 'done');
+});
+
+test('a task saved with one owner still works, and its creator can take everyone off it', async () => {
+    const f = fixture({ task: { status: 'progress', userId: 'alice' } });
+    assert.equal(taskOptions((await interact(f, 'kanban:mine:0', { userId: 'alice' })).payload).length, 1);
+    await interact(f, 'kanban:claim:task-1', { userId: 'carol' });
+    assert.deepEqual(f.task().userIds, ['alice', 'carol']);
+    assert.equal(f.task().userId, undefined);
+    const creator = await interact(f, 'kanban:view:task-1', { userId: 'bob' });
+    assert.deepEqual(labels(creator.payload), ['Join', 'Mark Done', 'Unclaim everyone', 'Edit', 'Delete', 'Find Work', 'My Tasks']);
+    assert.match((await interact(f, 'kanban:unclaim:task-1', { userId: 'bob' })).payload.content, /Everyone was taken off RC-1\. It is back in To Do/);
+    assert.deepEqual(f.task().userIds, []);
+    assert.equal(getTaskStatus(f.task()), 'todo');
 });
 
 test('Add Task and Edit use one short form and validate the due date', async () => {
@@ -210,7 +234,7 @@ test('Add Task and Edit use one short form and validate the due date', async () 
     const created = await interact(f, 'kanban:create', { type: 'modal', fields: modalFields(modal, { title: '[POWER] New task', due: '2026-12-01' }) });
     assert.match(created.payload.content, /Created \*\*RC-1\*\*/);
     const task = f.client.taskStorage.getAllTasks(f.guild.id).find(item => item.title === '[POWER] New task');
-    assert.equal(task.userId, null);
+    assert.deepEqual(task.userIds, []);
     assert.equal(task.dueDate, '2026-12-01');
 
     const edit = await interact(f, `kanban:edit:${task.id}`, { userId: 'carol' });
@@ -225,7 +249,7 @@ test('Add Task and Edit use one short form and validate the due date', async () 
 test('delete asks once to confirm and respects permissions', async () => {
     const f = fixture();
     const denied = await interact(f, 'kanban:delete:task-1', { userId: 'carol' });
-    assert.match(denied.payload.content, /Only the person/);
+    assert.match(denied.payload.content, /Only the people/);
     const confirm = await interact(f, 'kanban:delete:task-1', { userId: 'bob' });
     assert.deepEqual(labels(confirm.payload), ['Delete permanently', 'Cancel']);
     assert.equal(f.client.taskStorage.getAllTasks(f.guild.id).length, 1);
@@ -357,6 +381,25 @@ test('managers can turn a notice on and off for each board, and write their own'
     assert.match(cards()[0].description, /or ask an exec\.$/);
     await board.execute({ ...message('main-channel'), content: '!task notice set' }, ['notice', 'set']);
     assert.match(replies.at(-1), /Write the notice after the command/);
+});
+
+test('!task assign adds several people to a task, and none takes everyone off', async () => {
+    const f = fixture({ task: { status: 'progress', userIds: ['alice'] } });
+    const replies = [];
+    const user = id => ({ id, toString: () => `<@${id}>` });
+    const message = (mentioned, userId = 'admin') => ({
+        client: f.client, guild: f.guild, channel: { id: 'channel' }, author: { id: userId }, reply: async text => replies.push(text),
+        member: { permissions: new PermissionsBitField(userId === 'admin' ? [PermissionFlagsBits.ManageGuild] : []) },
+        mentions: { users: new Collection(mentioned.map(id => [id, user(id)])) }
+    });
+    await board.execute(message(['carol', 'dave']), ['assign', 'RC-1', '<@carol>', '<@dave>']);
+    assert.equal(replies.at(-1), 'RC-1 assigned to <@carol>, <@dave>.');
+    assert.deepEqual(f.task().userIds, ['alice', 'carol', 'dave']);
+    await board.execute(message(['erin'], 'carol'), ['assign', 'RC-1', '<@erin>']);
+    assert.match(replies.at(-1), /Only managers/);
+    await board.execute(message([]), ['assign', 'RC-1', 'none']);
+    assert.deepEqual(f.task().userIds, []);
+    assert.equal(getTaskStatus(f.task()), 'todo');
 });
 
 test('the exec board keeps its tasks separate from the main board', async () => {

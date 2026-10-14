@@ -8,8 +8,8 @@ A manager runs `!task setup` once. The bot posts a live board that updates by it
 
 Members need three buttons:
 
-1. **Find Work**: pick an open task (use the category menu at the top to show only one category), then click **Claim**. The task becomes yours and moves to In Progress.
-2. **My Tasks**: pick your task, then click **Mark Done**, or **Unclaim** to hand it back.
+1. **Find Work**: pick an open task (use the category menu at the top to show only one category), then click **Claim**. The task becomes yours and moves to In Progress. Several people can work on one task: tasks someone already claimed stay in Find Work, where others click **Join**.
+2. **My Tasks**: pick your task, then click **Mark Done**, or **Unclaim** to step off it. The task goes back to To Do once nobody is left on it.
 3. **Add Task**: a short form with a title, an optional description, and an optional due date. Start the title with a tag like `[POWER]` to group it.
 
 **Locked tasks.** A task can be blocked by other tasks in the same `[TAG]` category. It stays hidden from the board and Find Work, and can't be claimed, until those tasks are done. The board shows how many tasks are still locked in each category. Tasks in other categories never block it. Managers set blockers with `!task block KEY OTHER-1, OTHER-2` (or `none`).
@@ -18,13 +18,13 @@ Members need three buttons:
 
 **Exec board.** A manager runs `!task setup exec` in a private exec channel. Tasks added or imported there go on the exec board only. Each channel only sees, and can only change, its own board's tasks.
 
-The person working on a task, its creator, and server managers (Manage Server or Administrator) can mark it done, unclaim, reopen, edit, or delete it. Deleting asks for confirmation. Task views are private to the person who clicked.
+Anyone working on a task, its creator, and server managers (Manage Server or Administrator) can mark it done, reopen, edit, or delete it. **Unclaim** takes only you off a task; its creator or a manager can use it to take everyone off. Deleting asks for confirmation. Task views are private to the person who clicked.
 
 ## Commands
 
 - `!task` - Show the board
 - `!task add [TAG] Title` - Add a task
-- `!task claim KEY` - Take a task (moves it to In Progress)
+- `!task claim KEY` - Take a task, or join the people already on it (moves it to In Progress)
 - `!task done KEY` / `!task unclaim KEY` / `!task reopen KEY`
 - `!task details KEY` - Show one task
 - `!task edit KEY New title` / `!task due KEY 2026-12-01|none` / `!task delete KEY`
@@ -38,7 +38,7 @@ Managers:
 - `!task notice on|off` - Show or hide a "How this board works" card at the top of the board in this channel (each server and board has its own setting)
 - `!task notice set Your text` / `!task notice default` - Use your own notice text, or go back to the built-in one
 - `!task refresh` - Redraw the live board
-- `!task assign KEY @user|none` - Assign a task to someone
+- `!task assign KEY @user [@user2…]|none` - Add people to a task, or take everyone off it
 - `!task import` - Attach a `.txt`/`.md` list or paste it after the command, then confirm the preview. Each task starts with `Title:`, optionally followed by `Description:` (can span lines) and `Due date: YYYY-MM-DD`. Numbering, headings, and the old `Priority:`/`Team:` lines are ignored. Titles already on the board are skipped. Up to 250 tasks per import.
 - `!task setchannel [add|remove|list] [#channel]` - Limit the channels where the bot responds
 - `!task role all @Role [remove]` - Add or remove a role for everyone (Manage Roles)
