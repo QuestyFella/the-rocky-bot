@@ -1,5 +1,5 @@
 const { EmbedBuilder, escapeMarkdown } = require('discord.js');
-const { getTaskStatus, getIssueKey, sortBoardTasks, formatDue, isLocked, clipText, getSummary } = require('./kanban');
+const { getTaskStatus, getIssueKey, sortBoardTasks, formatDue, isLocked, clipText, getSummary, getOwners } = require('./kanban');
 const { getTaskTag, groupTasksByTag, getTagStyle } = require('./taskTags');
 const { buildBoardComponents } = require('./boardComponents');
 
@@ -15,7 +15,8 @@ const fieldsPerEmbed = 25;
 function taskField(task, { showTag = false } = {}) {
     const tag = getTaskTag(task);
     const title = showTag ? `${getTagStyle(tag.name).emoji} ${tag.title}` : tag.title;
-    const facts = [task.userId ? `👤 <@${task.userId}>` : null, formatDue(task) ? `📅 ${formatDue(task)}` : null].filter(Boolean).join(' · ');
+    const owners = getOwners(task);
+    const facts = [owners.length ? `${owners.length > 1 ? '👥' : '👤'} ${owners.map(id => `<@${id}>`).join(', ')}` : null, formatDue(task) ? `📅 ${formatDue(task)}` : null].filter(Boolean).join(' · ');
     const summary = getSummary(task) ? escapeMarkdown(clipText(getSummary(task), 300)) : '';
     return {
         name: clipText(`${getIssueKey(task)} · ${escapeMarkdown(title)}`, 256),
@@ -45,8 +46,8 @@ const defaultNotice = {
     title: '📌 How this board works',
     description: [
         '**1. Find something to do.** Click **Find Work** below. Use the category menu to see only your area, then pick a task to read what it involves.',
-        '**2. Claim it.** Click **Claim**. The task is yours and moves to 🔧 In Progress, so nobody else picks it up.',
-        '**3. Finish it.** Open **My Tasks** and click **Mark Done**. Can\'t finish it? Click **Unclaim** to hand it back.',
+        '**2. Claim it.** Click **Claim**. The task moves to 🔧 In Progress with your name on it. Others can click **Join** to work on it with you.',
+        '**3. Finish it.** Open **My Tasks** and click **Mark Done**. Can\'t carry on? Click **Unclaim** to step off it.',
         '',
         '🔒 **Locked tasks:** some tasks wait for earlier ones in the same category. They appear here once those are done.',
         '➕ **Spotted something missing?** Click **Add Task**. You can edit or delete tasks you created or claimed.',
@@ -84,7 +85,7 @@ function boardCards(tasks, title, { notice = false } = {}) {
         color: blue,
         fields: []
     });
-    if (doing.length) cards.push(...sectionCards({ title: '🔧 In Progress', color: orange, fields: doing.map(task => taskField(task, { showTag: true })) }));
+    if (doing.length) cards.push(...sectionCards({ title: '🔧 In Progress', description: 'Want to help with one of these? Find it in **Find Work** and click **Join**.', color: orange, fields: doing.map(task => taskField(task, { showTag: true })) }));
     for (const group of groupTasksByTag(todo)) {
         const open = sortBoardTasks(group.tasks.filter(task => !isLocked(task, tasks)));
         const waiting = group.tasks.length - open.length;

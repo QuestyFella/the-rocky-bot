@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { dataPath } = require('./utils/dataPaths');
+const { getOwners } = require('./utils/kanban');
 
 class TaskStorage {
     constructor(tasksDir = dataPath('server-tasks')) {
@@ -101,7 +102,7 @@ class TaskStorage {
 
     getUserTasks(guildId, userId) {
         const allTasks = this.loadTasks(guildId);
-        return allTasks.filter(task => task.userId === userId);
+        return allTasks.filter(task => getOwners(task).includes(userId));
     }
 
     getTaskIndex(guildId, taskId) {

@@ -10,7 +10,7 @@ module.exports = {
             .setDescription([
                 '**Getting started takes three clicks:**',
                 '1. On the board, click **Find Work** and pick a task.',
-                '2. Click **Claim**. It is now yours and In Progress.',
+                '2. Click **Claim**. It is now yours and In Progress. Others can click **Join** to work on it with you.',
                 '3. When finished, open **My Tasks** and click **Mark Done**.',
                 '',
                 'Anyone can click **Add Task**. Start a title with a tag like `[POWER]` to group related work.',
@@ -34,7 +34,7 @@ module.exports = {
                         '`!task setup exec` - Post the exec board here (its tasks stay off the main board)',
                         '`!task block KEY OTHER-1, OTHER-2|none` - Hide a task until same-category tasks are done',
                         '`!task import` - Attach a .txt list (`Title:`, `Description:`, `Due date:` lines) or paste it after the command',
-                        '`!task assign KEY @user|none` - Assign a task',
+                        '`!task assign KEY @user [@user2…]|none` - Add people to a task, or take everyone off it',
                         '`!task notice on|off` - Show or hide a "How this board works" card at the top of this channel\'s board',
                         '`!task notice set Your text` / `!task notice default` - Use your own notice text, or go back to the built-in one',
                         '`!task refresh` - Redraw the live board',

@@ -59,6 +59,22 @@ function parseDueDate(input) {
     return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value ? { ok: true, dueDate: value } : { ok: false };
 }
 
+// The people working on a task. Several people can claim the same task.
+// Older tasks stored a single person in userId.
+function getOwners(task) {
+    if (Array.isArray(task.userIds)) return task.userIds;
+    return task.userId ? [task.userId] : [];
+}
+
+function setOwners(task, owners) {
+    task.userIds = [...new Set(owners)];
+    delete task.userId;
+}
+
+function isOwner(task, userId) {
+    return getOwners(task).includes(userId);
+}
+
 function getTaskBoard(task) {
     return task.board === 'exec' ? 'exec' : 'main';
 }
@@ -74,7 +90,7 @@ function getBlockers(task, tasks) {
 
 // Blocked tasks stay hidden until their blockers are done, unless someone already took them on.
 function isLocked(task, tasks) {
-    return getTaskStatus(task) === 'todo' && !task.userId && getBlockers(task, tasks).length > 0;
+    return getTaskStatus(task) === 'todo' && !getOwners(task).length && getBlockers(task, tasks).length > 0;
 }
 
 function isManager(actor) {
@@ -82,15 +98,15 @@ function isManager(actor) {
     return Boolean(permissions?.has(PermissionFlagsBits.Administrator) || permissions?.has(PermissionFlagsBits.ManageGuild));
 }
 
-// One rule for changing a task: the person working on it, its creator, or a manager.
+// One rule for changing a task: anyone working on it, its creator, or a manager.
 function canChange(actor, task) {
-    return isManager(actor) || task.userId === actor.author.id || task.createdBy === actor.author.id;
+    return isManager(actor) || isOwner(task, actor.author.id) || task.createdBy === actor.author.id;
 }
 
 function claimError(actor, task, tasks = []) {
     if (getTaskStatus(task) === 'done') return 'This task is already done.';
     if (isLocked(task, tasks)) return `This task unlocks after ${getBlockers(task, tasks).map(getIssueKey).join(', ')} ${getBlockers(task, tasks).length > 1 ? 'are' : 'is'} done.`;
-    if (task.userId && task.userId !== actor.author.id) return 'Someone else is already working on this task.';
+    if (isOwner(task, actor.author.id)) return 'You are already working on this task.';
     return null;
 }
 
@@ -102,5 +118,5 @@ function setTaskStatus(task, status) {
 
 module.exports = {
     columns, getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, clipText, getSummary, parseDueDate,
-    getTaskBoard, getBlockers, isLocked, isManager, canChange, claimError, setTaskStatus
+    getOwners, setOwners, isOwner, getTaskBoard, getBlockers, isLocked, isManager, canChange, claimError, setTaskStatus
 };

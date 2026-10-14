@@ -4,7 +4,7 @@ const { randomUUID } = require('crypto');
 const { dataPath } = require('../utils/dataPaths');
 const { renderBoard } = require('../utils/boardDisplay');
 const { buildTaskView, buildTaskPicker } = require('../utils/boardComponents');
-const { getIssueKey, getTaskBoard, parseDueDate, isManager, canChange, claimError, setTaskStatus } = require('../utils/kanban');
+const { getIssueKey, getTaskBoard, parseDueDate, isManager, canChange, claimError, setTaskStatus, getOwners, setOwners, isOwner } = require('../utils/kanban');
 const { getTaskTag } = require('../utils/taskTags');
 
 const boardConfigFile = dataPath('kanbanBoards.json');
@@ -63,7 +63,7 @@ function createIssue(actor, { title, description = '', dueDate = null }, board =
     const now = new Date().toISOString();
     return {
         id: randomUUID(), issueKey, title, description, dueDate, status: 'todo', completed: false,
-        createdAt: now, updatedAt: now, userId: null, createdBy: actor.author.id, guildId: actor.guild.id,
+        createdAt: now, updatedAt: now, userIds: [], createdBy: actor.author.id, guildId: actor.guild.id,
         ...(board === 'main' ? {} : { board })
     };
 }
@@ -170,22 +170,34 @@ const taskCommands = {
     claim: {
         usage: '!task claim KEY',
         check: (actor, task, tasks) => claimError(actor, task, tasks),
-        apply: (actor, task) => { task.userId = actor.author.id; setTaskStatus(task, 'progress'); return `${getIssueKey(task)} is yours and In Progress.`; }
+        apply: (actor, task) => {
+            const others = getOwners(task).length;
+            setOwners(task, [...getOwners(task), actor.author.id]);
+            setTaskStatus(task, 'progress');
+            return others ? `You joined ${getIssueKey(task)}. ${others} other${others > 1 ? 's are' : ' is'} working on it too.` : `${getIssueKey(task)} is yours and In Progress.`;
+        }
     },
     done: {
         usage: '!task done KEY',
-        check: (actor, task) => !canChange(actor, task) && 'Only the person working on this task, its creator, or a manager can change it.',
+        check: (actor, task) => !canChange(actor, task) && 'Only the people working on this task, its creator, or a manager can change it.',
         apply: (actor, task) => { setTaskStatus(task, 'done'); return `${getIssueKey(task)} marked done. Nice work!`; }
     },
+    // People working on a task take only themselves off it; its creator or a manager can clear everyone.
     unclaim: {
         usage: '!task unclaim KEY',
-        check: (actor, task) => !canChange(actor, task) && 'Only the person working on this task, its creator, or a manager can change it.',
-        apply: (actor, task) => { task.userId = null; setTaskStatus(task, 'todo'); return `${getIssueKey(task)} is back in To Do for someone else.`; }
+        check: (actor, task) => !canChange(actor, task) && 'Only the people working on this task, its creator, or a manager can change it.',
+        apply: (actor, task) => {
+            const leaving = isOwner(task, actor.author.id);
+            setOwners(task, leaving ? getOwners(task).filter(id => id !== actor.author.id) : []);
+            if (getOwners(task).length) return `You left ${getIssueKey(task)}. The others are still on it.`;
+            setTaskStatus(task, 'todo');
+            return `${leaving ? `You left ${getIssueKey(task)}` : `Everyone was taken off ${getIssueKey(task)}`}. It is back in To Do for someone else.`;
+        }
     },
     reopen: {
         usage: '!task reopen KEY',
-        check: (actor, task) => !canChange(actor, task) && 'Only the person working on this task, its creator, or a manager can change it.',
-        apply: (actor, task) => { setTaskStatus(task, task.userId ? 'progress' : 'todo'); return `${getIssueKey(task)} reopened.`; }
+        check: (actor, task) => !canChange(actor, task) && 'Only the people working on this task, its creator, or a manager can change it.',
+        apply: (actor, task) => { setTaskStatus(task, getOwners(task).length ? 'progress' : 'todo'); return `${getIssueKey(task)} reopened.`; }
     }
 };
 const aliases = { start: 'claim', close: 'done', release: 'unclaim', board: 'show', list: 'show', kanban: 'show', jira: 'show', view: 'details', rename: 'edit', remove: 'delete', duedate: 'due' };
@@ -267,7 +279,7 @@ async function execute(message, args) {
 
     const usage = taskCommands[subcommand]?.usage || {
         details: '!task details KEY', edit: '!task edit KEY New title', delete: '!task delete KEY',
-        due: '!task due KEY YYYY-MM-DD|none', assign: '!task assign KEY @user|none',
+        due: '!task due KEY YYYY-MM-DD|none', assign: '!task assign KEY @user [@user2…]|none',
         block: '!task block KEY OTHER-1, OTHER-2|none'
     }[subcommand];
     if (!usage) return message.client.commands.get('help').execute(message);
@@ -289,11 +301,12 @@ async function execute(message, args) {
 
     if (subcommand === 'assign') {
         if (!isManager(actor)) return message.reply('Only managers can assign tasks to others. Use `!task claim KEY` to take one yourself.');
-        const user = message.mentions.users.first();
-        if (!user && value.toLowerCase() !== 'none') return message.reply('Mention a member, or use `none`.');
-        task.userId = user?.id || null;
-        setTaskStatus(task, user ? 'progress' : 'todo');
-        return message.reply(save(task) ? `${getIssueKey(task)} ${user ? `assigned to ${user}` : 'unassigned'}.` : 'Failed to save the task.');
+        // Mentioned members join the people already on the task; "none" takes everyone off it.
+        const users = [...message.mentions.users.values()];
+        if (!users.length && value.toLowerCase() !== 'none') return message.reply('Mention one or more members, or use `none`.');
+        setOwners(task, users.length ? [...getOwners(task), ...users.map(user => user.id)] : []);
+        setTaskStatus(task, users.length ? 'progress' : 'todo');
+        return message.reply(save(task) ? `${getIssueKey(task)} ${users.length ? `assigned to ${users.join(', ')}` : 'unassigned'}.` : 'Failed to save the task.');
     }
 
     if (subcommand === 'block') {
@@ -305,7 +318,7 @@ async function execute(message, args) {
         return message.reply(save(task) ? (blockedBy.length ? `${getIssueKey(task)} stays hidden until its blockers are done.` : `${getIssueKey(task)} is no longer blocked.`) : 'Failed to save the task.');
     }
 
-    if (!canChange(actor, task)) return message.reply('Only the person working on this task, its creator, or a manager can change it.');
+    if (!canChange(actor, task)) return message.reply('Only the people working on this task, its creator, or a manager can change it.');
 
     if (subcommand === 'delete') {
         return message.reply(storage.deleteTask(message.guild.id, task.id) ? `Deleted ${getIssueKey(task)}.` : 'Failed to delete the task.');
