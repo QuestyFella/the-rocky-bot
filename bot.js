@@ -84,6 +84,10 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+// One failed reply or handler must not stop the bot for everyone: log it and carry on.
+client.on(Events.Error, error => console.error('Discord client error:', error));
+process.on('unhandledRejection', error => console.error('Unhandled promise rejection:', error));
+
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) {
         return;
@@ -104,4 +108,8 @@ client.on('messageCreate', async (message) => {
     await executeCommand(message, route);
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// Without a login the bot can do nothing, so exit and let PM2 and the deployment check see the failure.
+client.login(process.env.DISCORD_TOKEN).catch(error => {
+    console.error('Could not log in to Discord:', error);
+    process.exit(1);
+});

@@ -48,9 +48,9 @@ module.exports = {
             serverConfig.allowedChannelIds.push(channelId);
             const success = message.client.saveServerConfig(message.guild.id, serverConfig);
             if (success) {
-                message.reply(`The bot is now allowed to operate in <#${channelId}>.`);
+                return message.reply(`The bot is now allowed to operate in <#${channelId}>.`);
             } else {
-                message.reply('Failed to save configuration.');
+                return message.reply('Failed to save configuration.');
             }
         } else if (subCommand === 'remove') {
             if (serverConfig.allowedChannelIds.length === 1 && serverConfig.allowedChannelIds[0] === channelId) {
@@ -63,12 +63,12 @@ module.exports = {
             serverConfig.allowedChannelIds.splice(index, 1);
             const success = message.client.saveServerConfig(message.guild.id, serverConfig);
             if (success) {
-                message.reply(`The bot is no longer restricted to <#${channelId}>.`);
+                return message.reply(`The bot is no longer restricted to <#${channelId}>.`);
             } else {
-                message.reply('Failed to save configuration.');
+                return message.reply('Failed to save configuration.');
             }
         } else {
-            message.reply('Invalid subcommand. Use `add`, `remove`, or `list`.');
+            return message.reply('Invalid subcommand. Use `add`, `remove`, or `list`.');
         }
     }
 };
