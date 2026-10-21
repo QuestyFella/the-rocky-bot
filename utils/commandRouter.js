@@ -63,15 +63,13 @@ function parseMessageCommand(content) {
 async function executeCommand(message, route) {
     const command = message.client.commands.get(route.commandName);
 
-    if (!command) {
-        return message.reply('Unknown task command. Use `!task help` for a list of commands.');
-    }
-
     try {
-        await command.execute(message, route.args);
+        if (command) await command.execute(message, route.args);
+        else await message.reply('Unknown task command. Use `!task help` for a list of commands.');
     } catch (error) {
         console.error(`Error executing command ${route.commandName}:`, error);
-        await message.reply('There was an error executing that command.');
+        // This reply can fail too, for example when the bot cannot post here or the message was deleted.
+        await message.reply('There was an error executing that command.').catch(() => {});
     }
 }
 
