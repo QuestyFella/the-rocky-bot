@@ -48,7 +48,7 @@ async function handleBoardInteraction(interaction) {
     // Each channel only sees and changes the tasks of its own board.
     const boardTasks = () => board.boardTasks(interaction.client, interaction.guildId, actor.board);
     const taskId = action === 'select' ? interaction.values?.[0] : target;
-    const task = boardTasks().find(item => String(item.id) === taskId);
+    const findTask = () => boardTasks().find(item => String(item.id) === taskId);
 
     // Modals must be shown as the very first response.
     if (action === 'add' && interaction.isButton()) {
@@ -56,6 +56,7 @@ async function handleBoardInteraction(interaction) {
         return true;
     }
     if (action === 'edit' && interaction.isButton()) {
+        const task = findTask();
         if (!task) await ephemeral('This task no longer exists.');
         else if (!canChange(actor, task)) await ephemeral(cannotChange);
         else if ((task.title || '').length > 4000 || (task.description || '').length > 4000) await ephemeral('This task is too long for the edit form. Use `!task edit KEY New title`.');
@@ -107,6 +108,9 @@ async function handleBoardInteraction(interaction) {
         await reply({ content: 'This button is out of date. Run `!task` to open the current board.' });
         return true;
     }
+    // Read the task only after waiting for Discord above, so it includes clicks handled in the meantime.
+    // Keep reading, checking, and saving free of awaits, so two quick clicks cannot undo each other.
+    const task = findTask();
     if (!task) {
         await reply({ content: 'This task no longer exists. Click **Find Work** to see current tasks.' });
         return true;
@@ -135,7 +139,6 @@ async function handleBoardInteraction(interaction) {
             content = storage.updateTask(interaction.guildId, task.id, task) ? 'Saved.' : 'Failed to save the task.';
         }
     } else {
-        // No awaits between reading, checking, and saving, so two quick clicks cannot undo each other.
         const { check, apply } = board.taskCommands[action];
         content = check(actor, task, boardTasks());
         if (!content) {
