@@ -224,6 +224,35 @@ test('a task saved with one owner still works, and its creator can take everyone
     assert.equal(getTaskStatus(f.task()), 'todo');
 });
 
+test('clicks at the same moment never undo each other', async () => {
+    const f = fixture();
+    const [alice, carol] = await Promise.all([
+        interact(f, 'kanban:claim:task-1', { userId: 'alice' }),
+        interact(f, 'kanban:claim:task-1', { userId: 'carol' })
+    ]);
+    assert.match(alice.payload.content, /RC-1 is yours/);
+    assert.match(carol.payload.content, /You joined RC-1/);
+    assert.deepEqual(f.task().userIds, ['alice', 'carol']);
+
+    // Saving the edit form keeps someone who joined at the same moment.
+    const editModal = (await interact(f, 'kanban:edit:task-1', { userId: 'bob' })).payload;
+    await Promise.all([
+        interact(f, 'kanban:claim:task-1', { userId: 'dave' }),
+        interact(f, editModal.toJSON().custom_id, { type: 'modal', userId: 'bob', fields: modalFields(editModal, { title: '[POWER] Check battery pack' }) })
+    ]);
+    assert.deepEqual(f.task().userIds, ['alice', 'carol', 'dave']);
+    assert.equal(f.task().title, '[POWER] Check battery pack');
+
+    // A late Join cannot reopen a task that was just marked done.
+    const [done, late] = await Promise.all([
+        interact(f, 'kanban:done:task-1', { userId: 'carol' }),
+        interact(f, 'kanban:claim:task-1', { userId: 'erin' })
+    ]);
+    assert.match(done.payload.content, /marked done/);
+    assert.match(late.payload.content, /already done/);
+    assert.equal(getTaskStatus(f.task()), 'done');
+});
+
 test('Add Task and Edit use one short form and validate the due date', async () => {
     const f = fixture();
     const opened = await interact(f, 'kanban:add', { privateMessage: false });
