@@ -17,7 +17,7 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 const { dataPath } = require('../utils/dataPaths');
 const { getTaskTag } = require('../utils/taskTags');
-const { getIssueKey, getTaskStatus, parseDueDate } = require('../utils/kanban');
+const { getIssueKey, getTaskStatus, getTaskBoard, isBoardName, parseDueDate } = require('../utils/kanban');
 
 const oldDependencyFields = ['dependsOn', 'dependsOnTags', 'hardDependsOn', 'hardDependsOnTags'];
 
@@ -75,9 +75,9 @@ function applyPlan(tasks, plan, { projectKey = 'TASK', nextIssueNumber = 1, now 
             else task.dueDate = due.dueDate;
         }
         if (row.board !== undefined) {
-            if (!['main', 'exec'].includes(row.board)) errors.push(`${label}: board must be "main" or "exec".`);
-            else if (row.board === 'exec') task.board = 'exec';
-            else delete task.board;
+            if (!isBoardName(row.board)) errors.push(`${label}: board must be a valid name such as "main", "exec", or "liquid-rocket".`);
+            else if (row.board === 'main') delete task.board;
+            else task.board = row.board;
         }
         if (row.title !== undefined || row.description !== undefined || row.dueDate !== undefined || row.board !== undefined) task.updatedAt = now;
         rows.push({ row, task, label });
@@ -123,8 +123,8 @@ function applyPlan(tasks, plan, { projectKey = 'TASK', nextIssueNumber = 1, now 
 function summarize({ tasks, created, deleted }) {
     const lines = [];
     const createdIds = new Set(created.map(task => task.id));
-    for (const board of ['main', 'exec']) {
-        const onBoard = tasks.filter(task => (task.board || 'main') === board);
+    for (const board of new Set(['main', 'exec', ...tasks.map(getTaskBoard)])) {
+        const onBoard = tasks.filter(task => getTaskBoard(task) === board);
         lines.push(`\n=== ${board} board (${onBoard.length} tasks)`);
         const tags = [...new Set(onBoard.map(task => getTaskTag(task).name))].sort();
         for (const tag of tags) {

@@ -1,6 +1,6 @@
 const { randomUUID } = require('crypto');
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, escapeMarkdown } = require('discord.js');
-const { parseDueDate } = require('./kanban');
+const { parseDueDate, getTaskBoard } = require('./kanban');
 
 const maxImportTasks = 250;
 const maxImportBytes = 256 * 1024;
@@ -81,8 +81,9 @@ async function readImportInput(text, attachments = [], fetchFile = globalThis.fe
 const titleKey = title => title.trim().replace(/\s+/g, ' ').toLowerCase();
 
 // Titles already on the board, or repeated in the list, are skipped.
-function newRows(actor, rows) {
-    const seen = new Set(actor.client.taskStorage.getAllTasks(actor.guild.id).map(task => titleKey(task.title || '')));
+function newRows(actor, rows, board) {
+    const seen = new Set(actor.client.taskStorage.getAllTasks(actor.guild.id)
+        .filter(task => getTaskBoard(task) === board).map(task => titleKey(task.title || '')));
     return rows.filter(row => !seen.has(titleKey(row.title)) && seen.add(titleKey(row.title)));
 }
 
@@ -100,12 +101,13 @@ function getImportDraft(actor, id) {
     const draft = actor.client.taskImports?.get(id);
     if (!draft || draft.expiresAt <= Date.now()) return { error: 'This import preview expired. Run `!task import` again.' };
     if (draft.userId !== actor.author.id || draft.guildId !== actor.guild.id) return { error: 'Only the person who started this import can confirm it.' };
+    if (draft.board !== (actor.board || 'main')) return { error: 'Confirm this import in the board channel where it was started.' };
     return { draft };
 }
 
 function commitImport(actor, draft) {
     const board = require('../commands/board');
-    const created = newRows(actor, draft.rows).map(row => board.createIssue(actor, row, draft.board));
+    const created = newRows(actor, draft.rows, draft.board).map(row => board.createIssue(actor, row, draft.board));
     const existing = actor.client.taskStorage.getAllTasks(actor.guild.id);
     if (created.length && !actor.client.taskStorage.saveTasks(actor.guild.id, [...existing, ...created])) return { error: 'Failed to save tasks. Nothing was imported.' };
     actor.client.taskImports.delete(draft.id);
@@ -113,7 +115,7 @@ function commitImport(actor, draft) {
 }
 
 function buildImportPreview(actor, draft) {
-    const fresh = newRows(actor, draft.rows);
+    const fresh = newRows(actor, draft.rows, draft.board);
     const list = fresh.slice(0, 15).map(row => `• ${escapeMarkdown(row.title.slice(0, 100))}`).join('\n');
     return {
         content: `**Import preview:** ${fresh.length} new task(s)${draft.rows.length > fresh.length ? `, ${draft.rows.length - fresh.length} duplicate title(s) skipped` : ''}.\n${list}${fresh.length > 15 ? `\n…and ${fresh.length - 15} more.` : ''}`.slice(0, 2000),

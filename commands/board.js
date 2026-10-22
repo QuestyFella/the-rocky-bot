@@ -4,13 +4,14 @@ const { randomUUID } = require('crypto');
 const { dataPath } = require('../utils/dataPaths');
 const { renderBoard } = require('../utils/boardDisplay');
 const { buildTaskView, buildTaskPicker } = require('../utils/boardComponents');
-const { getIssueKey, getTaskBoard, parseDueDate, isManager, canChange, claimError, setTaskStatus, getOwners, setOwners, isOwner } = require('../utils/kanban');
+const { getIssueKey, getTaskBoard, isBoardName, parseDueDate, isManager, canChange, claimError, setTaskStatus, getOwners, setOwners, isOwner } = require('../utils/kanban');
 const { getTaskTag } = require('../utils/taskTags');
 
 const boardConfigFile = dataPath('kanbanBoards.json');
 const legacyBoardConfigFile = dataPath('jiraBoards.json');
 let boardConfigCache = null;
 const boardUpdates = new Map();
+const boardSetups = new Map();
 const boardMessagePayloads = new Map();
 
 function loadBoardConfigs() {
@@ -43,13 +44,22 @@ function getBoardConfig(guild) {
 
 // The main board keeps its message IDs at the top level of the config (as before);
 // other boards, such as the exec board, live under config.boards.
-const boardNames = ['main', 'exec'];
+function boardNames(config) {
+    return ['main', ...Object.keys(config?.boards || {}).filter(name => name !== 'main' && isBoardName(name))];
+}
+
 function boardSlot(config, board) {
-    return board === 'main' ? config : ((config.boards ||= {})[board] ||= {});
+    if (board === 'main') return config;
+    const boards = config.boards ||= {};
+    if (!Object.hasOwn(boards, board)) boards[board] = {};
+    return boards[board];
 }
 
 function boardForChannel(guildId, channelId) {
-    return channelId && loadBoardConfigs()[guildId]?.boards?.exec?.channelId === channelId ? 'exec' : 'main';
+    const config = loadBoardConfigs()[guildId];
+    return channelId && config
+        ? boardNames(config).find(name => boardSlot(config, name).channelId === channelId) || 'main'
+        : 'main';
 }
 
 function boardTasks(client, guildId, board) {
@@ -70,14 +80,16 @@ function createIssue(actor, { title, description = '', dueDate = null }, board =
 
 function generateBoardMessages(client, guildId, board = 'main') {
     const guild = client.guilds.cache.get(guildId);
-    const title = !guild ? 'Task Board' : board === 'exec' ? `${guild.name} Exec Board` : getBoardConfig(guild).config.title;
-    const slot = boardSlot(loadBoardConfigs()[guildId] || {}, board);
+    const config = guild ? getBoardConfig(guild).config : loadBoardConfigs()[guildId] || {};
+    const slot = boardSlot(config, board);
+    const label = board.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+    const title = slot.title || (!guild ? 'Task Board' : `${guild.name} ${label} Board`);
     const notice = slot.notice ? slot.noticeText || true : false;
     return renderBoard(boardTasks(client, guildId, board), title, { notice });
 }
 
 async function syncBoard(client, guildId, force) {
-    for (const board of boardNames) await syncOneBoard(client, guildId, board, force);
+    for (const board of boardNames(loadBoardConfigs()[guildId])) await syncOneBoard(client, guildId, board, force);
 }
 
 async function syncOneBoard(client, guildId, board, force) {
@@ -202,6 +214,28 @@ const taskCommands = {
 };
 const aliases = { start: 'claim', close: 'done', release: 'unclaim', board: 'show', list: 'show', kanban: 'show', jira: 'show', view: 'details', rename: 'edit', remove: 'delete', duedate: 'due' };
 
+async function setupBoard(message, args) {
+    const board = args[0]?.toLowerCase() || boardForChannel(message.guild.id, message.channel.id);
+    if (args.length > 1 || !isBoardName(board)) return message.reply('Usage: `!task setup [name]`. Use 1–40 lowercase letters, numbers, or hyphens, starting with a letter or number; choose a name such as `liquid-rocket`.');
+    const { configs, config } = getBoardConfig(message.guild);
+    const occupied = boardNames(config).find(name => boardSlot(config, name).channelId === message.channel.id);
+    if (occupied && occupied !== board) return message.reply(`This channel already has the ${occupied} board. Use a different channel.`);
+    const slot = boardSlot(config, board);
+    if (slot.channelId && slot.channelId !== message.channel.id) return message.reply(`The ${board} board is already in <#${slot.channelId}>. Use a different name to create an independent board.`);
+    if (slot.channelId === message.channel.id && slot.messageId) {
+        await updateBoard(message.client, message.guild.id, { force: true });
+        return message.reply('Board refreshed. Its existing messages and tasks were kept.');
+    }
+    const sent = await message.channel.send(generateBoardMessages(message.client, message.guild.id, board)[0]);
+    Object.assign(slot, { channelId: message.channel.id, messageId: sent.id, messageIds: [sent.id] });
+    delete slot.sectionMessageIds;
+    saveBoardConfigs(configs);
+    await updateBoard(message.client, message.guild.id, { force: true });
+    return message.reply(board === 'main'
+        ? 'Live task board created. It updates by itself when tasks change.'
+        : `${board === 'exec' ? 'Exec' : board} board created. Tasks added or imported in this channel go on this board only.`);
+}
+
 async function execute(message, args) {
     const raw = (args.shift() || 'show').toLowerCase();
     const subcommand = aliases[raw] || raw;
@@ -217,18 +251,13 @@ async function execute(message, args) {
     if (subcommand === 'setup' || subcommand === 'refresh') {
         if (!isManager(actor)) return message.reply('You need Manage Server permission for that.');
         if (subcommand === 'setup') {
-            const board = args[0]?.toLowerCase() === 'exec' ? 'exec' : 'main';
-            const { configs, config } = getBoardConfig(message.guild);
-            const other = boardSlot(config, board === 'exec' ? 'main' : 'exec');
-            if (other.channelId === message.channel.id) return message.reply(`This channel already has the ${board === 'exec' ? 'main' : 'exec'} board. Use a different channel.`);
-            const sent = await message.channel.send(generateBoardMessages(message.client, message.guild.id, board)[0]);
-            Object.assign(boardSlot(config, board), { channelId: message.channel.id, messageId: sent.id, messageIds: [sent.id] });
-            delete config.sectionMessageIds;
-            saveBoardConfigs(configs);
-            await updateBoard(message.client, message.guild.id, { force: true });
-            return message.reply(board === 'exec'
-                ? 'Exec board created. Tasks added or imported in this channel go on this board only.'
-                : 'Live task board created. It updates by itself when tasks change.');
+            // Keep collision checks, posting, and persistence together even when two
+            // managers run setup at once. A failed setup must not poison later attempts.
+            const guildId = message.guild.id;
+            const setup = (boardSetups.get(guildId) || Promise.resolve()).catch(() => {}).then(() => setupBoard(message, args));
+            boardSetups.set(guildId, setup);
+            setup.finally(() => { if (boardSetups.get(guildId) === setup) boardSetups.delete(guildId); }).catch(() => {});
+            return setup;
         }
         await updateBoard(message.client, message.guild.id, { force: true });
         return message.reply('Board refreshed.');
