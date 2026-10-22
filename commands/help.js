@@ -31,7 +31,7 @@ module.exports = {
                     name: 'Managers',
                     value: [
                         '`!task setup` - Post the live board in this channel',
-                        '`!task setup exec` - Post the exec board here (its tasks stay off the main board)',
+                        '`!task setup NAME` - Create a separate board here (for example `exec` or `liquid-rocket`)',
                         '`!task block KEY OTHER-1, OTHER-2|none` - Hide a task until same-category tasks are done',
                         '`!task import` - Attach a .txt list (`Title:`, `Description:`, `Due date:` lines) or paste it after the command',
                         '`!task assign KEY @user [@user2…]|none` - Add people to a task, or take everyone off it',

@@ -75,8 +75,12 @@ function isOwner(task, userId) {
     return getOwners(task).includes(userId);
 }
 
+function isBoardName(name) {
+    return typeof name === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test(name) && name !== 'prototype' && !Object.hasOwn(Object.prototype, name);
+}
+
 function getTaskBoard(task) {
-    return task.board === 'exec' ? 'exec' : 'main';
+    return typeof task.board === 'string' && task.board ? task.board : 'main';
 }
 
 // Unfinished tasks this one waits on. Only blockers in the same [TAG] category count,
@@ -118,5 +122,5 @@ function setTaskStatus(task, status) {
 
 module.exports = {
     columns, getTaskStatus, getColumn, getIssueKey, sortBoardTasks, formatDue, clipText, getSummary, parseDueDate,
-    getOwners, setOwners, isOwner, getTaskBoard, getBlockers, isLocked, isManager, canChange, claimError, setTaskStatus
+    getOwners, setOwners, isOwner, isBoardName, getTaskBoard, getBlockers, isLocked, isManager, canChange, claimError, setTaskStatus
 };

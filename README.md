@@ -16,7 +16,7 @@ Members need three buttons:
 
 **Notice.** A manager can run `!task notice on` in a board's channel to put a short "How this board works" card at the top of that board, for new members. `!task notice off` removes it. To write your own instead, use `!task notice set` followed by your text (it can span several lines; a first line like `# Welcome` becomes the title). `!task notice default` goes back to the built-in one. Each server and board keeps its own notice.
 
-**Exec board.** A manager runs `!task setup exec` in a private exec channel. Tasks added or imported there go on the exec board only. Each channel only sees, and can only change, its own board's tasks.
+**Independent boards.** A manager runs `!task setup exec` in a private exec channel, or `!task setup liquid-rocket` in another project channel. Each name creates a separate task list. Use up to 40 lowercase letters, numbers, or hyphens, starting with a letter or number. Each channel only sees, and can only change, its own board's tasks. Repeating setup in the same channel keeps its messages and tasks; an existing board cannot be replaced by a different name or moved to another channel through setup.
 
 Anyone working on a task, its creator, and server managers (Manage Server or Administrator) can mark it done, reopen, edit, or delete it. **Unclaim** takes only you off a task; its creator or a manager can use it to take everyone off. Deleting asks for confirmation. Task views are private to the person who clicked.
 
@@ -33,7 +33,7 @@ Anyone working on a task, its creator, and server managers (Manage Server or Adm
 Managers:
 
 - `!task setup` - Post the live board in the current channel
-- `!task setup exec` - Post the exec board in the current channel
+- `!task setup NAME` - Post an independent board in the current channel (for example `exec` or `liquid-rocket`)
 - `!task block KEY OTHER-1, OTHER-2|none` - Hide a task until the listed same-category tasks are done
 - `!task notice on|off` - Show or hide a "How this board works" card at the top of the board in this channel (each server and board has its own setting)
 - `!task notice set Your text` / `!task notice default` - Use your own notice text, or go back to the built-in one
@@ -76,7 +76,8 @@ Plan rows look like `{ "key": "URC-15", "title": "[FIRMWARE] Watchdog", "board":
 
 Kanban issues are stored in `server-tasks/{serverId}.json` files per server. A user's issues in one Discord server never appear on another server's board.
 Configuration settings are stored in `server-configs/{serverId}.json` per server.
-Live Kanban board message IDs are stored in `kanbanBoards.json`.
+Live Kanban board message IDs are stored in `kanbanBoards.json` (main at the top level, named boards under `boards`). Task keys remain unique across the whole server.
+Once named boards contain tasks, do not roll back to a version that only supports main and exec: those older versions display other boards' tasks on main.
 Data files are automatically added to .gitignore.
 Set `BOT_DATA_DIR` to use a different storage folder. Set `BOT_ENV_FILE` to load the token from an existing `.env` file. Automatic deployments use these settings to share the original installation's data.
 
