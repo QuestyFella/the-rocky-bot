@@ -37,6 +37,7 @@ module.exports = {
                         '`!task assign KEY @user [@user2…]|none` - Add people to a task, or take everyone off it',
                         '`!task notice on|off` - Show or hide a "How this board works" card at the top of this channel\'s board',
                         '`!task notice set Your text` / `!task notice default` - Use your own notice text, or go back to the built-in one',
+                        '`!task launch set 2026-12-01 [14:30] Name` / `!task launch clear` - Set the launch countdown shown on apollo\'s homepage, login and task board',
                         '`!task refresh` - Redraw the live board',
                         '`!task setchannel add|remove|list #channel` - Limit where the bot answers',
                         '`!task role all @Role [remove]` - Add or remove a role for everyone'
