@@ -6,7 +6,7 @@ const taskPrefix = '!task';
 const kanbanSubcommands = new Set([
     'board', 'show', 'list', 'kanban', 'jira', 'setup', 'refresh', 'find', 'mine',
     'add', 'claim', 'start', 'done', 'close', 'unclaim', 'release', 'reopen',
-    'details', 'view', 'edit', 'rename', 'due', 'duedate', 'assign', 'block', 'notice', 'delete', 'remove', 'commands'
+    'details', 'view', 'edit', 'rename', 'due', 'duedate', 'assign', 'block', 'notice', 'launch', 'delete', 'remove', 'commands'
 ]);
 
 function isPrefixCommand(content, prefix) {

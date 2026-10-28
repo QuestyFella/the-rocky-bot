@@ -431,3 +431,20 @@ test('board plans accept and summarize named boards without mutating input tasks
     assert.match(summary, /RC-2.*Launch/);
     for (const name of ['constructor', '__proto__', '-bad', 'a'.repeat(41)]) assert.ok(applyPlan(tasks, [{ key: 'RC-1', board: name }]).errors.length);
 });
+
+test('launch countdown: managers set and clear it, everyone can see it', async () => {
+    const f = fixture();
+    assert.match(await f.run('main', ['launch']), /No launch countdown/);
+    assert.match(await f.run('main', ['launch', 'set', '2026-12-01', 'HAB'], { manager: false }), /Manage Server/);
+    assert.equal(f.config()?.launch, undefined);
+    assert.match(await f.run('main', ['launch', 'set', '2026-12-01', '14:30', 'HAB', 'launch', 'window']), /Countdown set: \*\*HAB launch window\*\* on 2026-12-01 at 14:30/);
+    assert.deepEqual(f.config().launch, { date: '2026-12-01', time: '14:30', name: 'HAB launch window', setBy: 'admin' });
+    assert.match(await f.run('main', ['launch'], { manager: false }), /HAB launch window/);
+    await f.run('main', ['launch', 'set', '2027-03-10']);
+    assert.deepEqual(f.config().launch, { date: '2027-03-10', time: null, name: 'Launch', setBy: 'admin' });
+    for (const bad of [['set', '2026-13-01'], ['set'], ['set', '2026-12-01', '25:00', 'x'], ['soon']]) {
+        assert.match(await f.run('main', ['launch', ...bad]), /Usage/);
+    }
+    assert.match(await f.run('main', ['launch', 'clear']), /cleared/);
+    assert.equal(f.config().launch, undefined);
+});

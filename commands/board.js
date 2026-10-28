@@ -214,6 +214,13 @@ const taskCommands = {
 };
 const aliases = { start: 'claim', close: 'done', release: 'unclaim', board: 'show', list: 'show', kanban: 'show', jira: 'show', view: 'details', rename: 'edit', remove: 'delete', duedate: 'due' };
 
+// A launch countdown (!task launch set), shown by apollo's homepage, login message and task board.
+function describeLaunch(launch) {
+    const days = Math.ceil((Date.parse(`${launch.date}T00:00:00Z`) - Date.now()) / 86400000);
+    const when = days > 1 ? `T-${days} days` : days === 1 ? 'tomorrow' : days === 0 ? 'today' : `${-days} days ago`;
+    return `**${launch.name}** on ${launch.date}${launch.time ? ` at ${launch.time}` : ''} (${when})`;
+}
+
 async function setupBoard(message, args) {
     const board = args[0]?.toLowerCase() || boardForChannel(message.guild.id, message.channel.id);
     if (args.length > 1 || !isBoardName(board)) return message.reply('Usage: `!task setup [name]`. Use 1–40 lowercase letters, numbers, or hyphens, starting with a letter or number; choose a name such as `liquid-rocket`.');
@@ -292,6 +299,28 @@ async function execute(message, args) {
             set: `Saved. The ${which} now starts with your notice.`,
             default: `The ${which} now uses the built-in "How this board works" notice.`
         }[choice]);
+    }
+
+    if (subcommand === 'launch') {
+        const choice = args[0]?.toLowerCase();
+        const { configs, config } = getBoardConfig(message.guild);
+        if (!choice) return message.reply(config.launch ? `Next launch: ${describeLaunch(config.launch)}.` : 'No launch countdown is set.');
+        if (!isManager(actor)) return message.reply('You need Manage Server permission for that.');
+        if (choice === 'clear') {
+            delete config.launch;
+            saveBoardConfigs(configs);
+            return message.reply('Launch countdown cleared.');
+        }
+        const usage = 'Usage: `!task launch set 2026-12-01 [14:30] Launch name` or `!task launch clear`.';
+        if (choice !== 'set') return message.reply(usage);
+        const date = args[1] || '';
+        const time = /^\d{1,2}:\d{2}$/.test(args[2] || '') ? args[2].padStart(5, '0') : null;
+        const name = args.slice(time ? 3 : 2).join(' ').trim() || 'Launch';
+        const parsed = parseDueDate(date);
+        if (!parsed.ok || !parsed.dueDate || (time && !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) || name.length > 80) return message.reply(usage);
+        config.launch = { date, time, name, setBy: message.author.id };
+        saveBoardConfigs(configs);
+        return message.reply(`Countdown set: ${describeLaunch(config.launch)}. It shows on apollo's homepage, login message and task board.`);
     }
 
     if (subcommand === 'add') {
