@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const TaskStorage = require('./taskStorage');
 const { executeCommand, loadCommands, parseMessageCommand } = require('./utils/commandRouter');
 const { handleBoardInteraction } = require('./utils/boardInteractions');
+const { createBridge } = require('./utils/ircBridge');
 const {
     canRunInChannel,
     getCachedServerConfig,
@@ -28,6 +29,9 @@ client.loadServerConfig = loadServerConfig;
 client.saveServerConfig = saveServerConfig;
 
 client.commands = loadCommands(path.join(__dirname, 'commands'));
+
+// Discord <-> apollo #lobby chat, if APOLLO_BRIDGE_CHANNEL_ID is set.
+const bridge = createBridge(client);
 
 client.taskStorage.setUpdateListener(async (guildId) => {
     const boardCommand = client.commands.get('board');
@@ -61,6 +65,7 @@ client.once(Events.ClientReady, async () => {
     if (process.send) process.send('ready');
 
     scheduleLiveBoardUpdates();
+    bridge?.start();
     for (const guild of client.guilds.cache.values()) {
         await client.commands.get('board').updateBoard(client, guild.id);
     }
@@ -78,6 +83,7 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 function shutdown() {
+    bridge?.stop();
     client.destroy();
     process.exit(0);
 }
@@ -89,6 +95,7 @@ client.on(Events.Error, error => console.error('Discord client error:', error));
 process.on('unhandledRejection', error => console.error('Unhandled promise rejection:', error));
 
 client.on('messageCreate', async (message) => {
+    bridge?.fromDiscord(message);
     if (message.author.bot || !message.guild) {
         return;
     }
