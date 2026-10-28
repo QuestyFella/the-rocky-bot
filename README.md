@@ -83,6 +83,18 @@ APOLLO_BRIDGE_CHANNEL_ID=123456789012345678
 
 Discord messages show on IRC as `<Name> text`. IRC messages show on Discord under the sender's nick, as `nick (apollo)`, through a webhook; give the bot **Manage Webhooks** in that channel. Without it, the bot posts `**nick:** text` itself. Mentions from IRC never ping anyone. The bot reconnects by itself if the IRC server restarts.
 
+## apollo's club room (optional)
+
+When the bot runs on apollo, it can stand in for the room's doorbell and shop sign. Add to `.env`:
+
+```
+APOLLO_BUZZ_CHANNEL_ID=123456789012345678   # !buzz here rings the room
+APOLLO_SHOP_CHANNEL_ID=123456789012345678   # the "shop open :D" / "shop closed :(" message
+# Defaults: APOLLO_ROOM_DIR=/var/lib/rocky-board  APOLLO_SHOP_REQUEST_FILE=/run/rocky-board-kiosk/shop-request.json
+```
+
+`!buzz [note]` writes `buzz.json` for apollo's monitor, which shows who buzzed and beeps; the bot reacts 🔔 (⏳ during the 10-second cooldown). Pressing S on apollo's keyboard writes the shop request file; the bot then edits its one message in the shop channel and writes `shop.json` for the monitor.
+
 ## Storage
 
 Kanban issues are stored in `server-tasks/{serverId}.json` files per server. A user's issues in one Discord server never appear on another server's board.

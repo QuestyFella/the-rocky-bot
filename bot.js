@@ -7,6 +7,7 @@ const TaskStorage = require('./taskStorage');
 const { executeCommand, loadCommands, parseMessageCommand } = require('./utils/commandRouter');
 const { handleBoardInteraction } = require('./utils/boardInteractions');
 const { createBridge } = require('./utils/ircBridge');
+const { createRoom } = require('./utils/apolloRoom');
 const {
     canRunInChannel,
     getCachedServerConfig,
@@ -32,6 +33,8 @@ client.commands = loadCommands(path.join(__dirname, 'commands'));
 
 // Discord <-> apollo #lobby chat, if APOLLO_BRIDGE_CHANNEL_ID is set.
 const bridge = createBridge(client);
+// apollo's club room: !buzz rings it, and its keyboard flips the shop-open message.
+const room = createRoom(client);
 
 client.taskStorage.setUpdateListener(async (guildId) => {
     const boardCommand = client.commands.get('board');
@@ -66,6 +69,7 @@ client.once(Events.ClientReady, async () => {
 
     scheduleLiveBoardUpdates();
     bridge?.start();
+    room?.start();
     for (const guild of client.guilds.cache.values()) {
         await client.commands.get('board').updateBoard(client, guild.id);
     }
@@ -84,6 +88,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
 function shutdown() {
     bridge?.stop();
+    room?.stop();
     client.destroy();
     process.exit(0);
 }
@@ -96,6 +101,7 @@ process.on('unhandledRejection', error => console.error('Unhandled promise rejec
 
 client.on('messageCreate', async (message) => {
     bridge?.fromDiscord(message);
+    room?.fromDiscord(message);
     if (message.author.bot || !message.guild) {
         return;
     }
