@@ -72,6 +72,17 @@ Plan rows look like `{ "key": "URC-15", "title": "[FIRMWARE] Watchdog", "board":
 8. Use `!task setchannel #your-task-channel` to restrict the bot to a specific channel (admin only)
 9. Use `!task setup` in a project channel to create the live task board
 
+## IRC bridge (optional)
+
+The bot can relay chat between one Discord channel and an IRC channel, such as apollo's `#lobby`. Add to `.env`:
+
+```
+APOLLO_BRIDGE_CHANNEL_ID=123456789012345678
+# Defaults: APOLLO_IRC_HOST=127.0.0.1  APOLLO_IRC_PORT=6667  APOLLO_IRC_NICK=rocky  APOLLO_IRC_CHANNEL=#lobby
+```
+
+Discord messages show on IRC as `<Name> text`. IRC messages show on Discord under the sender's nick, as `nick (apollo)`, through a webhook; give the bot **Manage Webhooks** in that channel. Without it, the bot posts `**nick:** text` itself. Mentions from IRC never ping anyone. The bot reconnects by itself if the IRC server restarts.
+
 ## Storage
 
 Kanban issues are stored in `server-tasks/{serverId}.json` files per server. A user's issues in one Discord server never appear on another server's board.
