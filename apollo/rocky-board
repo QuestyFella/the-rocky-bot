@@ -1,0 +1,462 @@
+#!/usr/bin/env python3
+"""rocky-board: show the club's Discord task boards (main, rocketry, liquid-rocket) full-screen in a terminal.
+
+  rocky-board            live board (q to quit, space / arrows / PgUp / PgDn to change page)
+  rocky-board --once     print the board once and exit
+  rocky-board --kiosk    apollo's monitor mode (used by rocky-board-kiosk.service): only the
+                         page keys work, and a page turned by hand stays up for a minute.
+                         It also shows !buzz from Discord (apollo-sound plays the tune) and S flips the shop sign.
+
+Reads the snapshot written by rocky-board-export (refreshed every 15 seconds).
+"""
+import signal
+import sys
+import termios
+
+KIOSK = "--kiosk" in sys.argv
+
+
+def lock_keyboard():
+    """Kiosk mode: make the keyboard unable to stop, pause or freeze the board.
+
+    The main protection is in rocky-board-kiosk.service: the board only writes to the
+    monitor and never has it as its controlling terminal, so Ctrl-C/Ctrl-\\/Ctrl-Z have
+    no program to send a signal to. This adds two more layers, first thing at startup:
+      - the terminal: ISIG off (those keys make no signals), IXON off (Ctrl-S can't pause
+        the screen, and turning it off un-pauses a screen someone already paused),
+        BRKINT off (no signal from Break), ECHO/ICANON/IEXTEN off (typed keys never show)
+      - the program: those signals are ignored even if something else sends them
+    """
+    for s in (signal.SIGINT, signal.SIGQUIT, signal.SIGTSTP, signal.SIGHUP, signal.SIGTTIN, signal.SIGTTOU):
+        signal.signal(s, signal.SIG_IGN)
+    for fd in (1, 0):                      # stdout is the monitor in kiosk mode
+        try:
+            a = termios.tcgetattr(fd)
+        except termios.error:
+            continue
+        a[0] &= ~(termios.IXON | termios.IXOFF | termios.IXANY | termios.BRKINT)
+        a[3] &= ~(termios.ISIG | termios.ICANON | termios.ECHO | termios.IEXTEN)
+        a[6][termios.VMIN], a[6][termios.VTIME] = 1, 0
+        termios.tcsetattr(fd, termios.TCSANOW, a)
+        break
+
+
+if KIOSK:
+    lock_keyboard()
+
+import json
+import uuid
+import re
+import os
+import select
+import shutil
+import time
+import traceback
+import tty
+import unicodedata
+from datetime import datetime, timezone
+
+SNAPSHOT = os.environ.get("ROCKY_BOARD_FILE", "/var/lib/rocky-board/board.json")
+# The club room (the rocky bot writes these): who !buzz-ed on Discord, and whether the shop is open
+ROOM_DIR = os.environ.get("ROCKY_ROOM_DIR", "/var/lib/rocky-board")
+BUZZ_FILE, SHOP_FILE = os.path.join(ROOM_DIR, "buzz.json"), os.path.join(ROOM_DIR, "shop.json")
+REQUEST_DIR = os.environ.get("RUNTIME_DIRECTORY", "")   # kiosk only: where S asks the bot to flip the shop
+BUZZ_SECONDS = 45          # how long the buzz box stays up (any key dismisses it)
+SHOP_KEYS = (b"s", b"S")
+PAGE_SECONDS = 12
+HOLD_SECONDS = 60          # on the monitor, after someone turns the page by hand
+NEXT_KEYS = (b" ", b"\x1b[C", b"\x1b[B", b"\x1b[6~", b"n", b"j", b"l")     # right, down, PgDn
+PREV_KEYS = (b"\x1b[D", b"\x1b[A", b"\x1b[5~", b"p", b"k", b"h")           # left, up, PgUp
+STALE_SECONDS = 120
+ONCE = "--once" in sys.argv
+
+# ANSI colours that also work on the plain Linux console (16 colours)
+RESET, BOLD, DIM, REV = "\033[0m", "\033[1m", "\033[2m", "\033[7m"
+FG = {"black": 30, "red": 31, "green": 32, "yellow": 33, "blue": 34, "magenta": 35, "cyan": 36, "white": 37}
+TAG_COLORS = {"POWER": "yellow", "FIRMWARE": "blue", "RADIO": "magenta", "MECHANICAL": "red",
+              "TEST": "cyan", "DECISION": "magenta", "LEGAL": "blue", "FLIGHT DAY": "red", "General": "white"}
+CYCLE = ["green", "cyan", "blue", "magenta", "yellow", "red"]
+
+
+def color(name, bold=False):
+    return f"\033[{'1;' if bold else ''}{FG[name]}m"
+
+
+def tag_color(name):
+    return TAG_COLORS.get(name) or CYCLE[sum(map(ord, name)) % len(CYCLE)]
+
+
+def clean(text):
+    """Text safe for the screen. The Linux console font has no emoji, so kiosk mode keeps Latin-1 only."""
+    text = " ".join(str(text).split())
+    if not KIOSK:
+        return text
+    out = []
+    for ch in unicodedata.normalize("NFKD", text):
+        if ord(ch) < 256 and unicodedata.category(ch) != "Mn":
+            out.append(ch)
+        elif unicodedata.category(ch) in ("Pd",):
+            out.append("-")
+    return "".join(out).strip()
+
+
+def width(text):
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 0 if unicodedata.combining(c) else 1 for c in text)
+
+
+def fit(text, w):
+    """Cut text to w columns, with an ellipsis-style '~' if it was cut."""
+    if width(text) <= w:
+        return text + " " * (w - width(text))
+    out, used = "", 0
+    for c in text:
+        cw = width(c)
+        if used + cw > w - 1:
+            break
+        out, used = out + c, used + cw
+    return out + "~" + " " * (w - used - 1)
+
+
+# A line is a list of (style, text) segments; render() pads or cuts it to an exact width.
+def render(segs, w):
+    out, used = [], 0
+    for style, text in segs:
+        room = w - used
+        if room <= 0:
+            break
+        t = fit(text, room) if width(text) > room else text
+        out.append(style + t + RESET)
+        used += width(t)
+    return "".join(out) + " " * max(0, w - used)
+
+
+def wrap(text, w, max_lines=2):
+    """Word-wrap into at most max_lines lines of w columns (the last one cut with '~' if needed)."""
+    words, lines, cur = text.split(), [], ""
+    for word in words:
+        if cur and width(cur) + 1 + width(word) > w:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}" if cur else word
+    lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines - 1] + [fit(" ".join(lines[max_lines - 1:]), w).rstrip()]
+    return lines
+
+
+def task_lines(t, colw, show_tag):
+    key = f"{t['key']:<8} "
+    title = (f"[{t['tag']}] " if show_tag else "") + clean(t["title"])
+    first, *rest = wrap(title, max(10, colw - 9))
+    lines = [[(BOLD, key), ("", first)]] + [[("", " " * 9 + more)] for more in rest]
+    facts = []
+    if t["owners"]:
+        facts.append((color("cyan"), ", ".join(clean(o) for o in t["owners"])))
+    if t["due"]:
+        if facts:
+            facts.append(("", "  "))
+        facts.append((color("red", True) if t["overdue"] else DIM, ("OVERDUE " if t["overdue"] else "due ") + t["due"]))
+    if facts:
+        lines.append([("", " " * 9)] + facts)
+    return lines
+
+
+def blocks(snap, colw):
+    """Board sections as (header_line, [task_block, ...]); a task block is 1-2 lines kept together."""
+    out = []
+    if snap["inProgress"]:
+        hdr = [(color("yellow", True), "IN PROGRESS"), (DIM, f"  {len(snap['inProgress'])} being worked on")]
+        out.append((hdr, [task_lines(t, colw, True) for t in snap["inProgress"]]))
+    for cat in snap["categories"]:
+        info = f"  {len(cat['ready'])} ready" + (f" - {cat['waiting']} locked" if cat["waiting"] else "")
+        hdr = [(color(tag_color(cat["name"]), True), clean(cat["name"]).upper()), (DIM, info)]
+        items = [task_lines(t, colw, False) for t in cat["ready"]] or [[[(DIM, "         nothing to claim right now")]]]
+        out.append((hdr, items))
+    return out
+
+
+def layout(snap, cols, colw, rows):
+    """Pour sections into columns and pages, newspaper style, never splitting a task."""
+    pages, page, col = [], [[] for _ in range(cols)], 0
+
+    def new_col():
+        nonlocal page, col
+        col += 1
+        if col == cols:
+            pages.append(page)
+            page, col = [[] for _ in range(cols)], 0
+
+    for hdr, items in blocks(snap, colw):
+        cur = page[col]
+        if cur and len(cur) + 3 > rows:          # header + first task won't fit: next column
+            new_col()
+        cur = page[col]
+        if cur:
+            cur.append([("", "")])
+        cur.append(hdr)
+        for item in items:
+            if len(page[col]) + len(item) > rows:
+                new_col()
+                page[col].append(hdr[:1] + [(DIM, "  (cont.)")])
+            page[col].extend(item)
+    if any(page):
+        pages.append(page)
+    return pages or [[[] for _ in range(cols)]]
+
+
+def launch_text(launch):
+    """'T-34d 05:12:09 to HAB launch window', or None if unset or over a day past."""
+    if not launch:
+        return None
+    try:
+        target = datetime.fromisoformat(f"{launch['date']}T{launch.get('time') or '00:00'}").timestamp()
+    except (KeyError, ValueError):
+        return None
+    left = int(target - time.time())
+    if left < -86400:
+        return None
+    name = clean(launch.get("name") or "launch")
+    if left <= 0:
+        return f"{name}: LAUNCH DAY!"
+    d, r = divmod(left, 86400)
+    return f"T-{d}d {r // 3600:02}:{r % 3600 // 60:02}:{r % 60:02} to {name}"
+
+
+def load():
+    try:
+        with open(SNAPSHOT, encoding="utf8") as f:
+            return json.load(f), None
+    except FileNotFoundError:
+        return None, "No board data yet. Is rocky-board-export running?"
+    except (OSError, ValueError) as e:
+        return None, f"Can't read the board data: {e}"
+
+
+def shown_boards(snap):
+    """Boards to page through: main always, the others while they have open tasks."""
+    boards = snap.get("boards") or [snap]
+    return [b for b in boards if b.get("name", "main") == "main"
+            or b["counts"]["ready"] + b["counts"]["progress"] + b["counts"]["waiting"]] or boards[:1]
+
+
+def frame(snap, err, page_no, w, h):
+    now = datetime.now().strftime("%a %d %b  %H:%M")
+    badge = ROOM.badge() if ROOM else None
+    side = ([badge, ("", " ")] if badge else []) + [(REV, " " + now + " ")]
+    header = lambda title: render([(REV + BOLD, fit(" " + clean(title).upper() + " ", max(1, w - sum(width(t) for _, t in side) - 1)))] + side, w)
+    if not snap:
+        lines = [header("Task Board"), render([(color("red", True), err or "")], w)]
+        return lines + [" " * w] * (h - len(lines)), 1
+    extra = []
+    countdown = launch_text(snap.get("launch"))
+    if countdown:
+        extra.append(render([(color("red", True), " >> " + countdown)], w))
+    age = time.time() - datetime.fromisoformat(snap["generatedAt"]).timestamp()
+    if age > STALE_SECONDS:
+        extra.append(render([(color("red", True), f" Board data is {int(age // 60)} min old - the exporter may be stopped.")], w))
+
+    rows = h - (3 + len(extra)) - 2
+    cols = 1 if ONCE else max(1, min(3, w // 56))
+    gap = 3
+    colw = (w - gap * (cols - 1)) // cols
+    boards = shown_boards(snap)
+    pages = [(b, p) for b in boards for p in layout(b, cols, colw, max(4, rows))]   # each board gets its own pages
+    page_no %= len(pages)
+    board, page = pages[page_no]
+    c = board["counts"]
+    lines = [header(board["title"]),
+             render([(color("yellow", True), f" {c['progress']} in progress"), ("", "   "),
+                     (color("green", True), f"{c['ready']} ready to claim"), ("", "   "),
+                     (DIM, f"{c['waiting']} locked   {c['done']} done")], w),
+             *extra, " " * w]
+    for r in range(rows):
+        segs = []
+        for ci in range(cols):
+            cell = page[ci][r] if r < len(page[ci]) else [("", "")]
+            segs.append(render(cell, colw))
+        lines.append((" " * gap).join(segs))
+    updated = datetime.fromisoformat(snap["generatedAt"]).astimezone().strftime("%H:%M:%S")
+    tabs = []
+    for b in boards:                                   # which board this is: current one highlighted
+        name = clean(b.get("name", "main"))
+        tabs += [(REV + BOLD, f" {name} ") if b is board else (DIM, f" {name} "), ("", " ")]
+    footer = f"page {page_no + 1}/{len(pages)}  -  updated {updated}  -  claim tasks on Discord: Find Work, or !task"
+    lines.append(" " * w)
+    lines.append(render([("", " ")] + (tabs + [("", "  ")] if len(boards) > 1 else []) + [(DIM, footer)], w))
+    return (ROOM.overlay(lines[:h], w, h) if ROOM else lines[:h]), len(pages)
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+class Room:
+    """The buzz box and the shop sign. (The !buzz tune is apollo-sound's job: it owns the speakers.)"""
+
+    def __init__(self):
+        self.buzz, self.buzz_until, self.shop, self.pending, self.last_press = None, 0, None, None, 0
+        self.seen = (read_json(BUZZ_FILE) or {}).get("id")        # never show a buzz from before we started
+
+    def poll(self):
+        b = read_json(BUZZ_FILE)
+        if isinstance(b, dict) and b.get("id") and b["id"] != self.seen:
+            self.seen = b["id"]
+            try:
+                fresh = time.time() - datetime.fromisoformat(b["at"].replace("Z", "+00:00")).timestamp() < 120
+            except (KeyError, ValueError, AttributeError):
+                fresh = False
+            if fresh:
+                self.buzz, self.buzz_until = b, time.time() + BUZZ_SECONDS
+        if self.buzz and time.time() > self.buzz_until:
+            self.buzz = None
+        s = read_json(SHOP_FILE)
+        self.shop = s if isinstance(s, dict) and isinstance(s.get("open"), bool) else None
+        if self.pending and self.shop and self.shop["open"] == self.pending["open"]:
+            self.pending = None
+
+    def toggle_shop(self):
+        if not (KIOSK and REQUEST_DIR) or time.time() - self.last_press < 2:
+            return
+        self.last_press = time.time()
+        now_open = self.pending["open"] if self.pending else bool(self.shop and self.shop["open"])
+        self.pending = {"open": not now_open, "at": time.time()}
+        req = {"id": uuid.uuid4().hex, "open": not now_open, "at": int(time.time() * 1000)}
+        path = os.path.join(REQUEST_DIR, "shop-request.json")
+        try:
+            with open(path + ".tmp", "w", encoding="utf8") as f:
+                json.dump(req, f)
+            os.chmod(path + ".tmp", 0o644)
+            os.replace(path + ".tmp", path)
+        except OSError:
+            self.pending = None
+
+    def badge(self):
+        """The shop sign for the header, or None when there's no shop state yet."""
+        if self.pending:
+            waited = time.time() - self.pending["at"]
+            word = "OPENING" if self.pending["open"] else "CLOSING"
+            return (color("yellow", True) + REV, f" SHOP {word}{'...' if waited < 30 else ' - bot not answering'} ")
+        if self.shop:
+            return (color("green" if self.shop["open"] else "red", True) + REV,
+                    " SHOP OPEN " if self.shop["open"] else " SHOP CLOSED ")
+        return (DIM, " shop: press S ") if KIOSK and REQUEST_DIR else None
+
+    def overlay(self, lines, w, h):
+        """The buzz box over the middle of the board."""
+        if not self.buzz:
+            return lines
+        bw = min(w - 4, 64)
+        name = clean(str(self.buzz.get("name") or "someone"))
+        note = clean(str(self.buzz.get("note") or ""))
+        try:
+            at = datetime.fromisoformat(self.buzz["at"].replace("Z", "+00:00")).astimezone().strftime("%H:%M")
+        except (KeyError, ValueError, AttributeError):
+            at = ""
+        body = ["", "*  B U Z Z  *", "", f"{name} is at the door!"] + ([f'"{note}"'] if note else []) + \
+               ["", f"{at} - #door-alarm on Discord", "(any key to dismiss)" if KIOSK else "", ""]
+        box = [(REV + color("red", True), fit(" " * ((bw - width(t)) // 2) + t, bw)) for t in body]
+        top = max(1, (h - len(box)) // 2)
+        left = " " * ((w - bw) // 2)
+        out = list(lines)
+        for i, seg in enumerate(box):
+            if top + i < len(out):
+                out[top + i] = render([("", left), seg], w)
+        return out
+
+
+ROOM = None
+
+
+def split_keys(data):
+    """Bytes read from the keyboard as separate keys (a held key arrives several to a read)."""
+    return re.findall(rb"\x1b\[[0-9;]*[~A-Za-z]|\x1b|.", data, re.S)
+
+
+def main():
+    if ONCE:
+        snap, err = load()
+        w, h = shutil.get_terminal_size((100, 40))
+        out, page, npages = [], 0, 1
+        while page < npages:                           # one page per board here
+            lines, npages = frame(snap, err, page, w, 10_000)
+            out.append("\n".join(l.rstrip() for l in lines).rstrip())
+            page += 1
+        try:
+            print("\n\n".join(out))
+        except BrokenPipeError:            # e.g. piped into head
+            sys.stderr.close()
+        return
+
+    fd = sys.stdin.fileno() if sys.stdin.isatty() else None
+    saved = termios.tcgetattr(fd) if fd is not None else None
+    if KIOSK:
+        # The keyboard was already locked out at startup (lock_keyboard). systemd restarts
+        # the board if it ever exits anyway.
+        sys.stdout.write("\033[9;0]\033[14;0]")       # never blank or power down the console
+    else:
+        sys.stdout.write("\033[?1049h")                # alternate screen: restores your terminal on exit
+        if fd is not None:
+            tty.setcbreak(fd)                          # read keys without Enter, don't echo; Ctrl-C still quits
+    sys.stdout.write("\033[?25l\033[2J")               # hide cursor, clear
+
+    if fd is not None:
+        termios.tcflush(fd, termios.TCIFLUSH)          # drop keys typed before the board started
+    global ROOM
+    ROOM = Room()
+    page, page_started, hold, last_size = 0, time.time(), PAGE_SECONDS, None
+    try:
+        while True:
+            w, h = shutil.get_terminal_size((100, 40))
+            if (w, h) != last_size:
+                sys.stdout.write("\033[2J")
+                last_size = (w, h)
+            snap, err = load()
+            ROOM.poll()
+            try:
+                lines, npages = frame(snap, err, page, w, h)
+            except Exception as e:                     # bad data must never take the board down
+                traceback.print_exc()
+                lines, npages = frame(None, f"Board data couldn't be shown ({type(e).__name__}). Retrying...", 0, w, h)
+            sys.stdout.write("\033[H" + "\n".join(lines) + "\033[J")
+            sys.stdout.flush()
+
+            ready = select.select([fd], [], [], 1.0)[0] if fd is not None else time.sleep(1.0)
+            if ready:
+                data = os.read(fd, 64)
+                if not data:                           # keyboard gone: keep showing the board
+                    fd = None
+                turned = False
+                for key in split_keys(data):
+                    if not KIOSK and key in (b"q", b"Q", b"\x1b"):
+                        return
+                    if ROOM.buzz:                      # first key just dismisses the buzz box
+                        ROOM.buzz, turned = None, True
+                        continue
+                    if key in SHOP_KEYS:
+                        ROOM.toggle_shop()
+                        turned = True
+                        continue
+                    step = 1 if key in NEXT_KEYS else -1 if key in PREV_KEYS else 0
+                    if step:                           # every other key does nothing
+                        page, turned = (page + step) % max(1, npages), True
+                        page_started, hold = time.time(), HOLD_SECONDS if KIOSK else PAGE_SECONDS
+                if turned:
+                    continue                           # show the new page right away
+            if time.time() - page_started >= hold:
+                page, page_started, hold = (page + 1) % max(1, npages), time.time(), PAGE_SECONDS
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if fd is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write(RESET + "\033[?25h" + ("" if KIOSK else "\033[?1049l"))
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

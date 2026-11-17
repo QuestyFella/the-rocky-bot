@@ -1,0 +1,23 @@
+[Unit]
+Description=apollo's club-room speakers: !buzz tunes, !say and !play (apollo-sound)
+After=sound.target network-online.target
+Wants=network-online.target
+
+[Service]
+# The only program that plays the speakers. The rocky bot (rockybot) writes requests into
+# /var/lib/apollo-sound/requests; install.sh gives that folder the bot's group.
+User=apollo-sound
+Group=apollo-sound
+SupplementaryGroups=audio
+ExecStart=/usr/local/bin/apollo-sound
+Environment=HOME=/var/lib/apollo-sound
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/apollo-sound
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""apollo-sound: the one program that plays apollo's club-room speakers (apollo-sound.service).
+
+  !buzz        one of the doorbell's eight tunes, never the same one twice in a row
+  !say text    spoken by espeak-ng
+  !play song   a YouTube search or link, queued; music pauses while a tune or !say plays
+  !skip        stops the song (the rocky bot counts the votes)
+
+The rocky bot writes one JSON file per request into REQUEST_DIR and reads STATE_FILE back for
+!queue and its replies. !buzz comes from buzz.json, the same file apollo's monitor shows.
+Every sound has a time limit, so one stuck player can never silence the room again.
+"""
+import array
+import json
+import math
+import os
+import queue
+import random
+import re
+import socket
+import subprocess
+import threading
+import time
+import traceback
+import wave
+from datetime import datetime
+from urllib.parse import urlparse
+
+SOUND_DIR = os.environ.get("APOLLO_SOUND_DIR", "/var/lib/apollo-sound")
+REQUEST_DIR = os.path.join(SOUND_DIR, "requests")      # the bot can write here (install.sh sets the group)
+STATE_FILE = os.path.join(SOUND_DIR, "state.json")
+BUZZ_FILE = os.path.join(os.environ.get("ROCKY_ROOM_DIR", "/var/lib/rocky-board"), "buzz.json")
+MUSIC_VOLUME = os.environ.get("APOLLO_MUSIC_VOLUME", "60")   # percent; tunes and !say play at full volume
+FRESH_SECONDS = 120          # like the monitor: a buzz older than this (the bot was down) never rings
+MAX_SONG_SECONDS = 600
+MAX_QUEUE, MAX_PER_PERSON = 20, 3
+MAX_SAY_CHARS = 300
+MAX_WAITING = 5              # tunes and speech waiting to play; more than that are dropped
+HEARTBEAT_SECONDS = 15       # STATE_FILE is rewritten at least this often; the bot reads an old one as "not running"
+TUNE_SECONDS, SAY_SECONDS = 30, 60
+LOOKUP_SECONDS = 60
+YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+YTDLP_OPTIONS = ["--js-runtimes", "node", "--no-playlist", "--no-warnings"]   # node: YouTube's JS challenges
+
+# The doorbell's tunes (WiFi-Doorbell: pizerdoor/r4_ethernet/doorbell_melody.h), played an octave lower:
+# the board's piezo needed them high, the room's speakers don't.
+# A note is PITCH:LENGTH with LENGTH in 32nd notes; "t" makes it a triplet (2/3 as long) and "/N" sounds
+# it for N% of its length (default 90). "-" is a rest; a bare number is a pitch in Hz.
+PITCHES = dict(Fs5=740, A5=880, As5=932, B5=988, C6=1047, D6=1175, Ds6=1245, E6=1319, Fs6=1480, G6=1568,
+               Gs6=1661, A6=1760, As6=1865, B6=1976, C7=2093, Cs7=2217, D7=2349, Ds7=2489, E7=2637,
+               F7=2794, Fs7=2960, Gs7=3322, As7=3729)
+TUNES = {   # name: (beats per minute, notes)
+    "Original": (167, "2794:4/100 -:4 1480:4/100 -:4 1396:4/100 -:4 698:4/100 -:4 "
+                      "698:4/100 1396:4/100 740:4/100 698:4/100 740:8/100 622:8/100"),
+    "Anesthetize": (110, "C6:4 G6:4 Ds7:6 Ds7:4 C7:4 C7:4 G6:2 D6:4 "
+                         "Ds6:4 As6:4 F7:6 F7:4 Ds7:4 Ds7:4 As6:2 Ds6:4 "
+                         "Gs6:4 Ds7:4 As7:6 As7:4 Gs7:4 Gs7:4 Ds7:2 Gs6:4 "
+                         "G6:4 Ds7:4 D7:4 G6:2 G6:4 F7:4 D7:4 F7:2 D7:4"),
+    "La Cucaracha": (180, "E6:4 E6:4 E6:4 A6:12 Cs7:9 E6:4 E6:4 E6:4 A6:12 D7:23 "
+                          "A6:8 A6:4 Gs6:4 Gs6:4 Fs6:4 Fs6:4 E6:16"),
+    "Crazy Train": (138, "Fs6:4 Fs6:4 Cs7:4 Fs6:4 D7:4 Fs6:4 Cs7:4 Fs6:4 "
+                         "B6:4 A6:4 Gs6:4 A6:4 B6:4 A6:4 Gs6:4/100 E6:4"),
+    "Hotel California": (75, "Fs6:4 Fs5:2 D6:2 B5:2 Fs6:2 B5:2 D6:2 B6:8 D6:4 E6:4 "
+                             "As5:4 E6:2 Fs6:2 Fs5:2 Cs7:2 E6:2 Fs6:2 As5:16"),
+    "Death by Glamour": (145, "Fs7:8 E7:4/50 Ds7:2 E7:8 -:2 Ds7:4/50 Cs7:4/50 "
+                              "Cs7:4 Ds7:4/50 Cs7:4/50 B6:2 Fs6:8 -:2 Ds6:4 E6:4 "
+                              "Fs6:4 -:2 Fs6:4 -:2 Gs6:4 Fs6:8 Ds7:4 As6:4 "
+                              "C7:4 -:2 C7:4 -:2 Ds7:4 Ds7:8 Ds7:4 Ds7:4"),
+    "Money": (132, "B5:8 B6:8t Fs6:4t B5:8/50 Fs5:8 A5:8 B5:8/50 D6:8 "
+                   "B5:8 B6:8t Fs6:4t B5:8/50 Fs5:8 A5:8 B5:8/50 D6:8"),
+    "Starless": (72, "C6:4t/100 D6:4t/100 As6:20/100 A6:2/100 As6:2/100 "
+                     "A6:4t/100 G6:4t/100 Ds6:4t/100 D6:12/100"),
+}
+
+
+def log(text):
+    print(text, flush=True)                             # to the journal: journalctl -u apollo-sound
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_json(path, value):
+    """Readers (the bot) never see half a file."""
+    temporary = f"{path}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf8") as f:
+        json.dump(value, f)
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, path)
+
+
+def tune_notes(bpm, notes):
+    """[(Hz, seconds sounding, seconds in all)], timed exactly like the doorbell's playDoorbellMelody."""
+    out, ticks, elapsed_ms = [], 0, 0
+    for note in notes.split():
+        pitch, length, triplet, gate = re.fullmatch(r"(-|\d+|[A-G]s?\d):(\d+)(t?)(?:/(\d+))?", note).groups()
+        hz = 0 if pitch == "-" else int(pitch) if pitch.isdigit() else PITCHES[pitch]
+        ticks += int(length) * (2 if triplet else 3)    # 24 ticks to a quarter note
+        end_ms = (ticks * 2500 + bpm // 2) // bpm       # 2500 = 60000 ms / 24 ticks
+        duration = end_ms - elapsed_ms
+        sounding = duration * int(gate or 90) // 100 if hz else duration
+        out.append((hz, sounding / 1000, duration / 1000))
+        elapsed_ms = end_ms
+    return out
+
+
+def write_tune(path, bpm, notes, rate=22050):
+    """The tune as a WAV: a soft square-ish tone, faded in and out so notes don't click."""
+    samples = array.array("h")
+    for hz, sounding, duration in tune_notes(bpm, notes):
+        n, total = int(rate * sounding), int(rate * duration)
+        fade = max(1, min(int(rate * 0.006), n // 2))
+        step = 2 * math.pi * (hz / 2) / rate             # an octave down
+        for i in range(n):
+            env = min(1.0, i / fade, (n - i) / fade)
+            samples.append(int(20000 * env * (math.sin(step * i) + math.sin(3 * step * i) / 3)))
+        samples.extend([0] * (total - n))
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(samples.tobytes())
+
+
+def youtube_url(text):
+    """text if it's a YouTube link, else None. Only YouTube: any other link could point yt-dlp
+    at apollo's own services or the campus network."""
+    try:
+        url = urlparse(text)
+        host = (url.hostname or "").lower()
+    except ValueError:
+        return None
+    return text if url.scheme in ("http", "https") and host in YOUTUBE_HOSTS else None
+
+
+def fresh(buzz):
+    try:
+        at = datetime.fromisoformat(buzz["at"].replace("Z", "+00:00")).timestamp()
+    except (KeyError, ValueError, AttributeError):
+        return False
+    return time.time() - at < FRESH_SECONDS
+
+
+def play_file(path, limit):
+    """Play a WAV to the end, but never for longer than limit seconds."""
+    try:
+        subprocess.run(["aplay", "-q", path], timeout=limit, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        log(f"gave up on {os.path.basename(path)} after {limit}s")
+
+
+class Speakers:
+    """Songs play one after another in the background; tunes and speech play in front, pausing the song."""
+
+    def __init__(self):
+        self.lock = threading.Condition()
+        self.songs, self.playing, self.results = [], None, []
+        self.mpv, self.ducked, self.dirty = None, False, True
+        self.front = queue.Queue()        # ("tune", path) or ("say", text)
+        self.lookups = queue.Queue()      # !play requests waiting for yt-dlp
+        self.tunes, self.last_tune = {}, None
+        self.mpv_socket = os.path.join(SOUND_DIR, "mpv.sock")
+
+    # -- requests from the bot ------------------------------------------------------------------
+    def handle(self, request):
+        if not isinstance(request, dict) or not request.get("id"):
+            return
+        kind = request.get("type")
+        if kind == "say":
+            text = " ".join(str(request.get("text") or "").split())[:MAX_SAY_CHARS]
+            if text and self.front.qsize() < MAX_WAITING:
+                self.front.put(("say", text))
+        elif kind == "play":
+            self.lookups.put(request)
+        elif kind == "skip":
+            self.answer(request["id"], ok=self.skip(request.get("songId")))
+
+    def answer(self, request_id, **fields):
+        with self.lock:
+            self.results = (self.results + [{"id": request_id, "at": int(time.time() * 1000), **fields}])[-30:]
+            self.dirty = True
+
+    def ring(self):
+        if not self.tunes or self.front.qsize() >= MAX_WAITING:
+            return
+        name = random.choice([n for n in self.tunes if n != self.last_tune] or list(self.tunes))
+        self.last_tune = name
+        log(f"!buzz: playing {name}")
+        self.front.put(("tune", self.tunes[name]))
+
+    def skip(self, song_id):
+        with self.lock:
+            if not (self.playing and self.playing["id"] == song_id and self.mpv):
+                return False
+            player, title = self.mpv, self.playing["title"]
+        log(f"skipping {title}")
+        player.terminate()
+        threading.Timer(3, lambda: player.poll() is None and player.kill()).start()
+        return True
+
+    # -- !play: find the song ----------------------------------------------------------------------
+    def find_song(self, request):
+        query = " ".join(str(request.get("query") or "").split())[:200]
+        if not query:
+            return {"error": "not-found"}
+        with self.lock:
+            if len(self.songs) >= MAX_QUEUE:
+                return {"error": "queue-full"}
+            if sum(s["byId"] == request.get("byId") for s in self.songs) >= MAX_PER_PERSON:
+                return {"error": "too-many"}
+        target = youtube_url(query) or f"ytsearch1:{query}"
+        try:
+            found = subprocess.run(["yt-dlp", *YTDLP_OPTIONS, "--skip-download", "--print",
+                                    "%(duration)s\t%(webpage_url)s\t%(title)s", "--", target],
+                                   capture_output=True, text=True, timeout=LOOKUP_SECONDS, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            log(f"yt-dlp took over {LOOKUP_SECONDS}s for {query!r}")
+            return {"error": "failed"}
+        line = next((l for l in found.stdout.splitlines() if l.count("\t") >= 2), None)
+        if not line:
+            if found.returncode:
+                log(f"yt-dlp failed for {query!r}: {(found.stderr.strip().splitlines() or ['?'])[-1]}")
+                return {"error": "failed"}
+            return {"error": "not-found"}
+        duration, url, title = line.split("\t", 2)
+        if not re.fullmatch(r"\d+(\.\d+)?", duration):
+            return {"error": "live", "title": title}
+        if float(duration) > MAX_SONG_SECONDS:
+            return {"error": "too-long", "title": title, "duration": int(float(duration))}
+        if not youtube_url(url):                          # only ever hand mpv a YouTube page
+            return {"error": "not-found"}
+        song = {"id": request["id"], "title": title, "duration": int(float(duration)), "url": url,
+                "by": str(request.get("by") or "someone"), "byId": request.get("byId")}
+        with self.lock:
+            self.songs.append(song)
+            ahead = len(self.songs) - 1 + (1 if self.playing else 0)
+            self.dirty = True
+            self.lock.notify_all()
+        log(f"queued {title} for {song['by']}")
+        return {"ok": True, "title": title, "duration": song["duration"], "ahead": ahead}
+
+    def lookup_worker(self):
+        while True:
+            request = self.lookups.get()
+            try:
+                result = self.find_song(request)
+            except Exception:
+                traceback.print_exc()
+                result = {"error": "failed"}
+            self.answer(request["id"], **result)
+
+    # -- the speakers ------------------------------------------------------------------------------
+    def duck(self, on):
+        """Pause (or resume) the song while a tune or !say plays."""
+        with self.lock:
+            self.ducked = on
+            if not self.mpv:
+                return
+        try:
+            with socket.socket(socket.AF_UNIX) as s:
+                s.settimeout(1)
+                s.connect(self.mpv_socket)
+                s.sendall(json.dumps({"command": ["set_property", "pause", on]}).encode() + b"\n")
+        except OSError:
+            pass
+
+    def front_worker(self):
+        while True:
+            kind, value = self.front.get()
+            self.duck(True)
+            try:
+                if kind == "tune":
+                    play_file(value, TUNE_SECONDS)
+                else:
+                    speech = os.path.join(SOUND_DIR, "say.wav")
+                    subprocess.run(["espeak-ng", "-s", "165", "-w", speech, "--stdin"], input=value.encode(),
+                                   timeout=20, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    play_file(speech, SAY_SECONDS)
+            except Exception:
+                traceback.print_exc()
+            if self.front.empty():
+                self.duck(False)
+
+    def music_worker(self):
+        while True:
+            with self.lock:
+                while not self.songs:
+                    self.lock.wait()
+                song = self.playing = self.songs.pop(0)
+                self.dirty = True
+                command = ["mpv", "--no-config", "--no-video", "--no-terminal", "--ao=alsa",
+                           f"--volume={MUSIC_VOLUME}", f"--input-ipc-server={self.mpv_socket}",
+                           "--ytdl-format=bestaudio/best", "--ytdl-raw-options=js-runtimes=node,no-playlist=",
+                           f"--pause={'yes' if self.ducked else 'no'}", "--", song["url"]]
+                try:
+                    self.mpv = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except OSError as error:
+                    log(f"can't start mpv: {error}")
+            log(f"playing {song['title']}")
+            if self.mpv:
+                try:
+                    self.mpv.wait(timeout=song["duration"] + 90)      # room for pauses and buffering
+                except subprocess.TimeoutExpired:
+                    log(f"gave up on {song['title']}: still playing well past its length")
+                    self.mpv.kill()
+                    self.mpv.wait()
+            with self.lock:
+                self.mpv, self.playing, self.dirty = None, None, True
+
+    # -- state for the bot -------------------------------------------------------------------------
+    def write_state(self):
+        public = lambda s: s and {k: s[k] for k in ("id", "title", "duration", "url", "by", "byId")}
+        with self.lock:
+            state = {"updatedAt": int(time.time() * 1000), "playing": public(self.playing),
+                     "queue": [public(s) for s in self.songs], "results": self.results}
+            self.dirty = False
+        write_json(STATE_FILE, state)
+
+    def load_tunes(self):
+        tune_dir = os.path.join(SOUND_DIR, "tunes")
+        os.makedirs(tune_dir, exist_ok=True)
+        for name, (bpm, notes) in TUNES.items():
+            path = os.path.join(tune_dir, name.lower().replace(" ", "-") + ".wav")
+            write_tune(path, bpm, notes)
+            self.tunes[name] = path
+
+    def run(self):
+        os.makedirs(REQUEST_DIR, exist_ok=True)
+        self.load_tunes()
+        for worker in (self.front_worker, self.music_worker, self.lookup_worker):
+            threading.Thread(target=worker, daemon=True).start()
+        seen = (read_json(BUZZ_FILE) or {}).get("id")       # never ring for a buzz from before we started
+        written = 0
+        log(f"ready: {len(self.tunes)} tunes; requests in {REQUEST_DIR}")
+        while True:
+            buzz = read_json(BUZZ_FILE)
+            if isinstance(buzz, dict) and buzz.get("id") and buzz["id"] != seen:
+                seen = buzz["id"]
+                if fresh(buzz):
+                    self.ring()
+            for name in sorted(os.listdir(REQUEST_DIR)):
+                if name.startswith(".") or not name.endswith(".json"):
+                    continue
+                path = os.path.join(REQUEST_DIR, name)
+                request = read_json(path)
+                try:
+                    os.remove(path)
+                except OSError as error:                       # can't remove it: don't handle it every loop
+                    log(f"can't remove request {name}: {error}")
+                    continue
+                self.handle(request)
+            if self.dirty or time.time() - written > HEARTBEAT_SECONDS:
+                self.write_state()
+                written = time.time()
+            time.sleep(0.25)
+
+
+if __name__ == "__main__":
+    Speakers().run()

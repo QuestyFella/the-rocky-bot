@@ -8,6 +8,8 @@ const { executeCommand, loadCommands, parseMessageCommand } = require('./utils/c
 const { handleBoardInteraction } = require('./utils/boardInteractions');
 const { createBridge } = require('./utils/ircBridge');
 const { createRoom } = require('./utils/apolloRoom');
+const { createSound } = require('./utils/apolloSound');
+const { createNethackLog } = require('./utils/nethackLog');
 const {
     canRunInChannel,
     getCachedServerConfig,
@@ -35,6 +37,10 @@ client.commands = loadCommands(path.join(__dirname, 'commands'));
 const bridge = createBridge(client);
 // apollo's club room: !buzz rings it, and its keyboard flips the shop-open message.
 const room = createRoom(client);
+// apollo's speakers: !say, !play, !skip and !queue, from Discord and #lobby (apollo-sound plays them).
+const sound = createSound(client, undefined, { irc: bridge?.irc });
+// NetHack games that end on apollo are announced in #lobby.
+const nethack = createNethackLog(client, undefined, { irc: bridge?.irc });
 
 client.taskStorage.setUpdateListener(async (guildId) => {
     const boardCommand = client.commands.get('board');
@@ -70,6 +76,8 @@ client.once(Events.ClientReady, async () => {
     scheduleLiveBoardUpdates();
     bridge?.start();
     room?.start();
+    sound?.start();
+    nethack?.start();
     for (const guild of client.guilds.cache.values()) {
         await client.commands.get('board').updateBoard(client, guild.id);
     }
@@ -89,6 +97,8 @@ client.on(Events.InteractionCreate, async interaction => {
 function shutdown() {
     bridge?.stop();
     room?.stop();
+    sound?.stop();
+    nethack?.stop();
     client.destroy();
     process.exit(0);
 }
@@ -102,6 +112,7 @@ process.on('unhandledRejection', error => console.error('Unhandled promise rejec
 client.on('messageCreate', async (message) => {
     bridge?.fromDiscord(message);
     room?.fromDiscord(message);
+    sound?.fromDiscord(message);
     if (message.author.bot || !message.guild) {
         return;
     }
