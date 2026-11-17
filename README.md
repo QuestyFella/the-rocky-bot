@@ -93,7 +93,28 @@ APOLLO_SHOP_CHANNEL_ID=123456789012345678   # the "shop open :D" / "shop closed 
 # Defaults: APOLLO_ROOM_DIR=/var/lib/rocky-board  APOLLO_SHOP_REQUEST_FILE=/run/rocky-board-kiosk/shop-request.json
 ```
 
-`!buzz [note]` writes `buzz.json` for apollo's monitor, which shows who buzzed and beeps; the bot reacts 🔔 (⏳ during the 10-second cooldown). Pressing S on apollo's keyboard writes the shop request file; the bot then edits its one message in the shop channel and writes `shop.json` for the monitor.
+`!buzz [note]` writes `buzz.json` for apollo's monitor, which shows who buzzed, and apollo-sound plays one of the doorbell's tunes; the bot reacts 🔔 (⏳ during the 10-second cooldown). Pressing S on apollo's keyboard writes the shop request file; the bot then edits its one message in the shop channel and writes `shop.json` for the monitor.
+
+### Speakers and NetHack
+
+`apollo/` holds what runs on apollo itself: **apollo-sound**, the one program that plays the room's speakers, and the kiosk (`rocky-board`). Set them up once on apollo, from a copy of this folder: `sudo bash install.sh`. It installs `nethack`, `mpv`, `yt-dlp` and `espeak-ng` from Arch's repositories, starts apollo-sound, and switches the kiosk's own beep off.
+
+In the `!buzz` channel and the bridged `#lobby` (on Discord and IRC):
+
+- `!say <text>` says "<name> says: <text>" out loud in the room (espeak-ng; once every 30 seconds each).
+- `!play <song or YouTube link>` queues it (up to 10 minutes, 3 songs each). Music pauses while a tune or `!say` plays.
+- `!skip` votes the song off: two votes, or one from whoever queued it. `!queue` (or `!np`) shows what's on.
+
+Every NetHack game that ends on apollo is announced in `#lobby`, on Discord and IRC. Members share one pool of ghosts (bones) and one high-score list (`nethack -s`).
+
+```
+# Optional. Defaults: the !buzz and bridge channels; anyone who can post there
+APOLLO_SOUND_CHANNEL_IDS=123456789012345678,123456789012345679
+APOLLO_MEMBER_ROLE_ID=123456789012345678
+APOLLO_NETHACK_CHANNEL_ID=123456789012345678
+```
+
+Check apollo-sound with `journalctl -u apollo-sound`, and its own checks with `python3 apollo/test-apollo-sound.py`. If `!play` answers "Couldn't reach YouTube", update yt-dlp with `sudo pacman -Syu`.
 
 ## Storage
 
