@@ -116,6 +116,19 @@ APOLLO_NETHACK_CHANNEL_ID=123456789012345678
 
 Check apollo-sound with `journalctl -u apollo-sound`, and its own checks with `python3 apollo/test-apollo-sound.py`. If `!play` answers "Couldn't reach YouTube", update yt-dlp with `sudo pacman -Syu`.
 
+### PCB accounts: `!join-pcb`
+
+`!join-pcb [name]` in the club's server asks for an account on apollo's Gitea, for uploading boards with
+pcb-hub. The bot answers with **Approve** and **Decline** buttons that only an exec (Manage Server or
+Administrator) can press. On approval it makes the account in the club's `Members` team and sends the
+username and a temporary password by direct message; Gitea asks for a new password at the first sign-in.
+Someone who already got an account this way gets a new password instead. Passwords never go in a channel.
+
+It is on when pcb-hub's `install.sh` has written the bot a Gitea token, `<BOT_DATA_DIR>/gitea-pcb-join-token`
+(or `APOLLO_GITEA_JOIN_TOKEN_FILE`). Defaults: `APOLLO_GITEA_API_URL=http://127.0.0.1:3000`,
+`APOLLO_GITEA_URL=http://10.16.26.107/gitea` (links in the DM), `APOLLO_GITEA_ORG=University-of-Guelph-Rocketry-Club`,
+`APOLLO_GITEA_TEAM=Members`. It answers only in the server that has apollo's room channels.
+
 ## Storage
 
 Kanban issues are stored in `server-tasks/{serverId}.json` files per server. A user's issues in one Discord server never appear on another server's board.

@@ -10,6 +10,7 @@ const { createBridge } = require('./utils/ircBridge');
 const { createRoom } = require('./utils/apolloRoom');
 const { createSound } = require('./utils/apolloSound');
 const { createNethackLog } = require('./utils/nethackLog');
+const { createPcbJoin } = require('./utils/pcbJoin');
 const {
     canRunInChannel,
     getCachedServerConfig,
@@ -41,6 +42,8 @@ const room = createRoom(client);
 const sound = createSound(client, undefined, { irc: bridge?.irc });
 // NetHack games that end on apollo are announced in #lobby.
 const nethack = createNethackLog(client, undefined, { irc: bridge?.irc });
+// !join-pcb: an exec-approved Gitea account for uploading boards, sent by DM.
+const pcbJoin = createPcbJoin(client);
 
 client.taskStorage.setUpdateListener(async (guildId) => {
     const boardCommand = client.commands.get('board');
@@ -85,6 +88,7 @@ client.once(Events.ClientReady, async () => {
 
 client.on(Events.InteractionCreate, async interaction => {
     try {
+        if (await pcbJoin?.fromInteraction(interaction)) return;
         await handleBoardInteraction(interaction);
     } catch (error) {
         console.error('Failed to handle board interaction:', error);
@@ -113,6 +117,7 @@ client.on('messageCreate', async (message) => {
     bridge?.fromDiscord(message);
     room?.fromDiscord(message);
     sound?.fromDiscord(message);
+    pcbJoin?.fromDiscord(message);
     if (message.author.bot || !message.guild) {
         return;
     }
