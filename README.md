@@ -101,7 +101,7 @@ APOLLO_SHOP_CHANNEL_ID=123456789012345678   # the "shop open :D" / "shop closed 
 
 In the `!buzz` channel and the bridged `#lobby` (on Discord and IRC):
 
-- `!say <text>` says "<name> says: <text>" out loud in the room (espeak-ng; once every 30 seconds each).
+- `!say <text>` says "<name> says: <text>" out loud in the room (once every 30 seconds each). It uses piper's natural voice once `sudo bash install-piper.sh` has added it (piper from the AUR, the voice from piper's library, both checked by checksum), and espeak-ng's robot voice until then.
 - `!play <song or YouTube link>` queues it (up to 10 minutes, 3 songs each). Music pauses while a tune or `!say` plays.
 - `!skip` votes the song off: two votes, or one from whoever queued it. `!queue` (or `!np`) shows what's on.
 

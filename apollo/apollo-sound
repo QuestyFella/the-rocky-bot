@@ -2,7 +2,7 @@
 """apollo-sound: the one program that plays apollo's club-room speakers (apollo-sound.service).
 
   !buzz        one of the doorbell's eight tunes, never the same one twice in a row
-  !say text    spoken by espeak-ng
+  !say text    spoken by piper's natural voice (install-piper.sh), or espeak-ng's robot one without it
   !play song   a YouTube search or link, queued; music pauses while a tune or !say plays
   !skip        stops the song (the rocky bot counts the votes)
 
@@ -39,6 +39,12 @@ MAX_WAITING = 5              # tunes and speech waiting to play; more than that 
 HEARTBEAT_SECONDS = 15       # STATE_FILE is rewritten at least this often; the bot reads an old one as "not running"
 TUNE_SECONDS, SAY_SECONDS = 30, 60
 LOOKUP_SECONDS = 60
+WAKE_SECONDS = 0.5           # silence first: apollo's sound chip sleeps after 10 idle seconds and clips what plays as it wakes
+SPEECH_PEAK = 30000          # speech is much quieter than the tunes; its loudest moment is turned up to this
+SPEECH_BOOST = float(os.environ.get("APOLLO_SPEECH_BOOST", "5"))   # then its quieter parts up to this much more; 1 is barely any
+PIPER = os.environ.get("APOLLO_PIPER", "/usr/bin/piper-tts")     # the AUR's piper-tts-bin
+PIPER_VOICE = os.environ.get("APOLLO_PIPER_VOICE",
+                             "/usr/share/piper-voices/en/en_US/lessac/medium/en_US-lessac-medium.onnx")
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
 YTDLP_OPTIONS = ["--js-runtimes", "node", "--no-playlist", "--no-warnings"]   # node: YouTube's JS challenges
 
@@ -109,22 +115,63 @@ def tune_notes(bpm, notes):
     return out
 
 
-def write_tune(path, bpm, notes, rate=22050):
-    """The tune as a WAV: a soft square-ish tone, faded in and out so notes don't click."""
-    samples = array.array("h")
-    for hz, sounding, duration in tune_notes(bpm, notes):
-        n, total = int(rate * sounding), int(rate * duration)
-        fade = max(1, min(int(rate * 0.006), n // 2))
-        step = 2 * math.pi * (hz / 2) / rate             # an octave down
-        for i in range(n):
-            env = min(1.0, i / fade, (n - i) / fade)
-            samples.append(int(20000 * env * (math.sin(step * i) + math.sin(3 * step * i) / 3)))
-        samples.extend([0] * (total - n))
+def add_tone(samples, hz, sounding, total, rate):
+    """hz for `sounding` seconds of a `total`-second slot: a soft square-ish tone, faded in and out so it doesn't click."""
+    n = int(rate * sounding)
+    fade = max(1, min(int(rate * 0.006), n // 2))
+    step = 2 * math.pi * hz / rate
+    for i in range(n):
+        env = min(1.0, i / fade, (n - i) / fade)
+        samples.append(int(20000 * env * (math.sin(step * i) + math.sin(3 * step * i) / 3)) if hz else 0)
+    samples.extend([0] * (int(rate * total) - n))
+
+
+def save_wav(path, samples, rate):
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(samples.tobytes())
+
+
+def write_tune(path, bpm, notes, rate=22050):
+    """The tune as a WAV, an octave down, after a moment of silence for the sound chip to wake."""
+    samples = array.array("h", bytes(2 * int(rate * WAKE_SECONDS)))
+    for hz, sounding, duration in tune_notes(bpm, notes):
+        add_tone(samples, hz / 2, sounding, duration, rate)
+    save_wav(path, samples, rate)
+
+
+def synthesize(text, path):
+    """text as a WAV: piper's natural voice once install-piper.sh has added it (checked every time, so no
+    restart is needed), else espeak-ng. If piper fails, espeak still says it."""
+    quiet = dict(input=text.encode(), timeout=30, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.access(PIPER, os.X_OK) and os.path.exists(PIPER_VOICE):
+        try:
+            subprocess.run([PIPER, "--model", PIPER_VOICE, "--output_file", path], **quiet)
+            return
+        except (OSError, subprocess.SubprocessError) as error:
+            log(f"piper failed ({error}); using espeak-ng")
+    subprocess.run(["espeak-ng", "-s", "150", "-w", path, "--stdin"], **quiet)
+
+
+def write_speech(raw, path):
+    """!say as the room hears it: a moment of silence for the sound chip to wake, a two-note chime,
+    then the speech, compressed so it's about as loud as the tunes: tanh lifts the quiet parts by up to
+    SPEECH_BOOST times while the loudest moments stay at SPEECH_PEAK, so nothing clips."""
+    with wave.open(raw) as w:
+        rate, mono16 = w.getframerate(), (w.getnchannels(), w.getsampwidth()) == (1, 2)
+        speech = array.array("h", w.readframes(w.getnframes()) if mono16 else b"")
+    if not mono16:                                        # not what piper or espeak-ng write: play it as it is
+        os.replace(raw, path)
+        return
+    peak = max(max(map(abs, speech), default=0), SPEECH_PEAK / 4)     # never lift near-silence more than 4x
+    boost = max(SPEECH_BOOST, 0.01)
+    samples = array.array("h", bytes(2 * int(rate * WAKE_SECONDS)))
+    add_tone(samples, 880, 0.12, 0.16, rate)
+    add_tone(samples, 1319, 0.2, 0.4, rate)
+    samples.extend(int(SPEECH_PEAK * math.tanh(boost * x / peak) / math.tanh(boost)) for x in speech)
+    save_wav(path, samples, rate)
 
 
 def youtube_url(text):
@@ -147,12 +194,18 @@ def fresh(buzz):
 
 
 def play_file(path, limit):
-    """Play a WAV to the end, but never for longer than limit seconds."""
+    """Play a WAV to the end, but stop aplay 3 s after the sound should have finished (and never after limit s):
+    on apollo it sometimes spins at full CPU instead of finishing (it did for 15 days from 2 Nov)."""
+    try:
+        with wave.open(path) as w:
+            limit = min(limit, w.getnframes() / w.getframerate() + 3)
+    except (OSError, EOFError, wave.Error):
+        pass
     try:
         subprocess.run(["aplay", "-q", path], timeout=limit, stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        log(f"gave up on {os.path.basename(path)} after {limit}s")
+        log(f"aplay froze on {os.path.basename(path)}; stopped it after {limit:.0f}s")
 
 
 class Speakers:
@@ -278,9 +331,9 @@ class Speakers:
                 if kind == "tune":
                     play_file(value, TUNE_SECONDS)
                 else:
-                    speech = os.path.join(SOUND_DIR, "say.wav")
-                    subprocess.run(["espeak-ng", "-s", "165", "-w", speech, "--stdin"], input=value.encode(),
-                                   timeout=20, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    raw, speech = os.path.join(SOUND_DIR, "say-voice.wav"), os.path.join(SOUND_DIR, "say.wav")
+                    synthesize(value, raw)
+                    write_speech(raw, speech)
                     play_file(speech, SAY_SECONDS)
             except Exception:
                 traceback.print_exc()

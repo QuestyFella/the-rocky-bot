@@ -3,6 +3,7 @@
 
   python3 apollo/test-apollo-sound.py
 """
+import array
 import importlib.machinery
 import importlib.util
 import json
@@ -14,6 +15,7 @@ import textwrap
 import threading
 import time
 import unittest
+import wave
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,15 +25,28 @@ LOG = os.path.join(TMP, "calls.log")
 for d in (SOUND_DIR, ROOM_DIR, BIN):
     os.makedirs(d)
 
+# Both voices write half a second of speech at about espeak's level (peak 15000), as a mono 16-bit WAV.
+SPEECH = """
+    import array, math, wave
+    def speech(out):
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050)
+            w.writeframes(array.array("h", (int(15000 * math.sin(i / 10)) for i in range(11025))).tobytes())
+"""
 FAKES = {
     "aplay": """
         log("aplay", os.path.basename(sys.argv[-1]))
-        time.sleep(0.3)
+        time.sleep(60 if "freeze" in sys.argv[-1] else 0.3)     # like aplay on apollo, now and then
     """,
-    "espeak-ng": """
-        out = sys.argv[sys.argv.index("-w") + 1]
-        open(out, "wb").close()
-        log("espeak", sys.stdin.read())
+    "espeak-ng": SPEECH + """
+    log("espeak", sys.stdin.read())
+    speech(sys.argv[sys.argv.index("-w") + 1])
+    """,
+    "piper-tts": SPEECH + """
+    text = sys.stdin.read()
+    log("piper", text, os.path.basename(sys.argv[sys.argv.index("--model") + 1]))
+    if "piperfail" in text: sys.exit(1)
+    speech(sys.argv[sys.argv.index("--output_file") + 1])
     """,
     "yt-dlp": """
         query = sys.argv[-1]
@@ -68,7 +83,10 @@ for name, body in FAKES.items():
                 f"def log(*a):\n    open({LOG!r}, 'a').write(' | '.join(a) + '\\n')\n" + textwrap.dedent(body))
     os.chmod(path, 0o755)
 
-os.environ.update(PATH=BIN + os.pathsep + os.environ["PATH"], APOLLO_SOUND_DIR=SOUND_DIR, ROCKY_ROOM_DIR=ROOM_DIR)
+VOICE = os.path.join(TMP, "voice.onnx")
+open(VOICE, "w").close()
+os.environ.update(PATH=BIN + os.pathsep + os.environ["PATH"], APOLLO_SOUND_DIR=SOUND_DIR, ROCKY_ROOM_DIR=ROOM_DIR,
+                  APOLLO_PIPER=os.path.join(BIN, "piper-tts"), APOLLO_PIPER_VOICE=VOICE)
 loader = importlib.machinery.SourceFileLoader("apollo_sound", os.path.join(HERE, "apollo-sound"))
 spec = importlib.util.spec_from_loader("apollo_sound", loader)
 sound = importlib.util.module_from_spec(spec)
@@ -128,6 +146,13 @@ class Tunes(unittest.TestCase):
         for bpm, notes in sound.TUNES.values():
             self.assertTrue(all(s <= d for _, s, d in sound.tune_notes(bpm, notes)))
 
+    def test_a_frozen_aplay_is_stopped_soon_after_the_sound_should_end(self):
+        path = os.path.join(TMP, "freeze.wav")
+        sound.save_wav(path, array.array("h", bytes(2 * 11025)), 22050)      # half a second
+        started = time.time()
+        sound.play_file(path, 60)
+        self.assertLess(time.time() - started, 5)
+
     def test_only_youtube_links(self):
         for good in ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "https://youtu.be/dQw4w9WgXcQ",
                      "https://music.youtube.com/watch?v=x"):
@@ -158,10 +183,30 @@ class Speakers(unittest.TestCase):
         self.assertNotEqual(first, second, "never the same tune twice in a row")
 
     def test_2_say(self):
+        said = lambda: [c for c in calls("aplay") if c[1] == "say.wav"]
         request("say", text="Sai says:   the   pizza is here")
-        wait_for(lambda: calls("espeak"))
-        self.assertEqual(calls("espeak")[-1][1], "Sai says: the pizza is here")
-        wait_for(lambda: [c for c in calls("aplay") if c[1] == "say.wav"])
+        wait_for(lambda: said())
+        self.assertEqual(calls("piper"), [["piper", "Sai says: the pizza is here", "voice.onnx"]])
+        self.assertEqual(calls("espeak"), [], "piper's voice when it's installed")
+        request("say", text="piperfail")
+        wait_for(lambda: said()[1:])
+        self.assertEqual(calls("espeak"), [["espeak", "piperfail"]], "espeak still says it if piper fails")
+        os.remove(VOICE)
+        request("say", text="no piper here")
+        wait_for(lambda: said()[2:])
+        self.assertEqual((len(calls("piper")), calls("espeak")[-1]), (2, ["espeak", "no piper here"]), "espeak without the voice")
+        # What plays: silence while the sound chip wakes, a chime, then the speech turned up.
+        with wave.open(os.path.join(SOUND_DIR, "say.wav")) as w:
+            rate, samples = w.getframerate(), array.array("h", w.readframes(w.getnframes()))
+        wake = int(rate * sound.WAKE_SECONDS)
+        self.assertEqual(max(map(abs, samples[:wake])), 0)
+        self.assertGreater(max(map(abs, samples[wake:wake + rate // 10])), 10000, "the chime")
+        speech = samples[-11025:]
+        self.assertAlmostEqual(max(map(abs, speech)), sound.SPEECH_PEAK, delta=50)
+        rms = (sum(x * x for x in speech) / len(speech)) ** 0.5
+        self.assertGreater(rms, 0.85 * sound.SPEECH_PEAK, "compressed: far louder on average than a plain sine at that peak (0.71)")
+        with wave.open(os.path.join(SOUND_DIR, "tunes", "money.wav")) as w:
+            self.assertEqual(max(map(abs, array.array("h", w.readframes(int(w.getframerate() * sound.WAKE_SECONDS))))), 0)
 
     def test_3_play_queue_skip_and_pause(self):
         time.sleep(0.6)                            # the last !say finishes, or the song would start paused
