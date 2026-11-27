@@ -12,6 +12,7 @@ KIOSK=/usr/local/bin/rocky-board
 KIOSK_KNOWN=(
     7fda643d44946b073a52ac9981d3ab127ca8f4ae6139c57de9451c6c9c3ffb21   # the kiosk that beeped by itself
     4ae0442f54eace69230f8031480e7861510e480036f00221aeb368daecb370e4   # apollo-sound kiosk (before space page)
+    db7006af0f9ddf3cb24c6fdf479f1d72d53ecfd2ff6002ff0b35b21fef7c0e68   # space dashboard kiosk (before borrow)
 )
 
 echo "== Packages: nethack, mpv, yt-dlp, espeak-ng"
@@ -42,7 +43,54 @@ systemctl daemon-reload
 systemctl enable --now rocky-space-export.timer
 systemctl start --no-block rocky-space-export.service
 
-echo "== Kiosk board (apollo-sound quiet buzz + Space Dashboard page)"
+echo "== apollo-borrow (equipment borrow tracker web UI + kiosk form)"
+id apollo-borrow >/dev/null 2>&1 ||
+    useradd --system --home-dir /var/lib/apollo-borrow --no-create-home --shell /usr/bin/nologin apollo-borrow
+install -d -o apollo-borrow -g apollo-borrow -m 0755 /var/lib/apollo-borrow
+install -m 0755 apollo-borrow /usr/local/bin/apollo-borrow
+install -m 0644 apollo-borrow.service /etc/systemd/system/apollo-borrow.service
+systemctl daemon-reload
+systemctl enable apollo-borrow
+systemctl restart apollo-borrow
+
+if [ -f /etc/nginx/nginx.conf ] && ! grep -q "location \^~ /borrow/" /etc/nginx/nginx.conf; then
+    cp -p /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak-borrow
+    python3 - <<'EOF'
+path = "/etc/nginx/nginx.conf"
+text = open(path, encoding="utf8").read()
+block = """
+        # Club equipment borrow tracker: /borrow/ -> 127.0.0.1:3010
+        location = /borrow {
+            return 301 /borrow/;
+        }
+        location ^~ /borrow/ {
+            proxy_pass http://127.0.0.1:3010/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+"""
+marker = "        # Never serve dotfiles"
+if marker in text:
+    updated = text.replace(marker, block + "\n" + marker, 1)
+else:
+    idx = text.rfind("}")
+    idx = text.rfind("}", 0, idx)
+    updated = text[:idx] + block + text[idx:]
+open(path, "w", encoding="utf8").write(updated)
+EOF
+    if nginx -t; then
+        systemctl reload nginx
+        echo "nginx: added /borrow/ proxy and reloaded"
+    else
+        cp -p /etc/nginx/nginx.conf.bak-borrow /etc/nginx/nginx.conf
+        echo "ERROR: nginx -t failed after adding /borrow/; restored backup." >&2
+        exit 1
+    fi
+fi
+
+echo "== Kiosk board (apollo-sound quiet buzz + Space Dashboard + Borrow form)"
 current=$(sha256sum "$KIOSK" | cut -d' ' -f1)
 known=0
 for h in "${KIOSK_KNOWN[@]}"; do

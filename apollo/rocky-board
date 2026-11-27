@@ -54,16 +54,25 @@ import time
 import traceback
 import tty
 import unicodedata
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 SNAPSHOT = os.environ.get("ROCKY_BOARD_FILE", "/var/lib/rocky-board/board.json")
 SPACE_SNAPSHOT = os.environ.get("ROCKY_SPACE_FILE", "/var/lib/rocky-space/space.json")
+BORROW_SNAPSHOT = os.environ.get("ROCKY_BORROW_FILE", "/var/lib/apollo-borrow/borrow.json")
+BORROW_API = os.environ.get("ROCKY_BORROW_URL", "http://127.0.0.1:3010").rstrip("/")
+BORROW_WEB_HINT = os.environ.get("ROCKY_BORROW_WEB", "http://10.16.26.107/borrow/")
 # The club room (the rocky bot writes these): who !buzz-ed on Discord, and whether the shop is open
 ROOM_DIR = os.environ.get("ROCKY_ROOM_DIR", "/var/lib/rocky-board")
 BUZZ_FILE, SHOP_FILE = os.path.join(ROOM_DIR, "buzz.json"), os.path.join(ROOM_DIR, "shop.json")
 REQUEST_DIR = os.environ.get("RUNTIME_DIRECTORY", "")   # kiosk only: where S asks the bot to flip the shop
 BUZZ_SECONDS = 45          # how long the buzz box stays up (any key dismisses it)
 SHOP_KEYS = (b"s", b"S")
+BORROW_KEYS = (b"b", b"B")
+RETURN_KEYS = (b"r", b"R")
+BORROW_IDLE_SECONDS = 120
+BORROW_FLASH_SECONDS = 5
 PAGE_SECONDS = 12
 HOLD_SECONDS = 60          # on the monitor, after someone turns the page by hand
 NEXT_KEYS = (b" ", b"\x1b[C", b"\x1b[B", b"\x1b[6~", b"n", b"j", b"l")     # right, down, PgDn
@@ -260,6 +269,20 @@ def load_space():
         except (OSError, ValueError) as e:
             return None, f"Can't read space data: {e}"
     return None, None
+
+
+def load_borrow():
+    """Read the borrow tracker snapshot if installed; (None, None) when not set up yet."""
+    try:
+        with open(BORROW_SNAPSHOT, encoding="utf8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None, "Borrow data file is not a JSON object."
+        return data, None
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as e:
+        return None, f"Can't read borrow data: {e}"
 
 
 # ---- Space dashboard (ISS/Tiangong passes, HF propagation, news, launches) --------------
@@ -659,6 +682,95 @@ def space_layout(space, cols, colw, rows, now):
     return pages or [[[] for _ in range(cols)]]
 
 
+def borrow_layout(borrow, cols, colw, rows, now):
+    """Build pages for the Borrowed Equipment view."""
+    active = [x for x in (borrow.get("active") or []) if isinstance(x, dict)]
+    recent = [x for x in (borrow.get("recentReturned") or []) if isinstance(x, dict)]
+
+    out_hdr = [(color("yellow", True), "CURRENTLY BORROWED"), (DIM, f"  {len(active)} out")]
+    out_items = []
+    for loan in active:
+        qty = clean(loan.get("remainingText") or loan.get("qtyText") or "1")
+        unit = clean(loan.get("unit") or "pcs")
+        item = clean(loan.get("item") or "item")
+        who = clean(loan.get("borrower") or "?")
+        disc = clean(loan.get("discord") or "")
+        age = fmt_age(loan.get("borrowedAt"), now)
+        try:
+            days = (now - datetime.fromisoformat(str(loan.get("borrowedAt")).replace("Z", "+00:00")).timestamp()) / 86400.0
+        except (TypeError, ValueError):
+            days = 0.0
+        age_style = color("red", True) if days >= 14 else DIM
+        prefix = f"{qty} {unit} "
+        wrapped = wrap(item, max(12, colw - width(prefix) - (width(age) + 2 if age else 0)), max_lines=1)
+        line1 = [(color("cyan", True), prefix), (BOLD, wrapped[0])]
+        if age:
+            line1 += [("", "  "), (age_style, age)]
+        line2 = [("", "  "), (color("green"), who)]
+        if disc:
+            line2.append((color("yellow"), f" (@{disc})"))
+        notes = clean(loan.get("notes") or "")
+        if notes:
+            line2.append((DIM, f"  - {notes}"))
+        out_items.append([line1, line2])
+    if not out_items:
+        out_items = [[[(DIM, "  nothing is currently borrowed - press B to check out gear")]]]
+
+    hist_hdr = [(color("green", True), "RECENTLY RETURNED"), (DIM, f"  web: {clean(BORROW_WEB_HINT)}")]
+    hist_items = []
+    for loan in recent[:(8 if ONCE else 6)]:
+        qty = clean(loan.get("qtyText") or "1")
+        unit = clean(loan.get("unit") or "pcs")
+        item = clean(loan.get("item") or "item")
+        who = clean(loan.get("borrower") or "?")
+        age = fmt_age(loan.get("returnedAt"), now)
+        line1 = [(DIM, f"{qty} {unit} "), ("", item)]
+        line2 = [(DIM, f"  {who}" + (f"  - returned {age}" if age else "  - returned"))]
+        hist_items.append([line1, line2])
+    if not hist_items:
+        hist_items = [[[(DIM, "  no returns logged yet")]]]
+
+    guide_hdr = [(color("cyan", True), "HOW TO USE"), (DIM, "  right here or on LAN")]
+    guide_items = [[
+        [(BOLD, "B"), ("", "  Borrow an item right on this keyboard")],
+        [(BOLD, "R"), ("", "  Return a borrowed item")],
+        [(DIM, f"Web: {clean(BORROW_WEB_HINT)}")],
+    ]]
+
+    sections = [
+        (out_hdr, out_items, False),
+        (hist_hdr, hist_items, cols >= 2),
+        (guide_hdr, guide_items, False),
+    ]
+    pages, page, col = [], [[] for _ in range(cols)], 0
+
+    def new_col():
+        nonlocal page, col
+        col += 1
+        if col == cols:
+            pages.append(page)
+            page, col = [[] for _ in range(cols)], 0
+
+    for hdr, items, prefer_new_col in sections:
+        if prefer_new_col and page[col]:
+            new_col()
+        cur = page[col]
+        if cur and len(cur) + 3 > rows:
+            new_col()
+        cur = page[col]
+        if cur:
+            cur.append([("", "")])
+        cur.append(hdr)
+        for item in items:
+            if len(page[col]) + len(item) > rows:
+                new_col()
+                page[col].append(hdr[:1] + [(DIM, "  (cont.)")])
+            page[col].extend(item)
+    if any(page):
+        pages.append(page)
+    return pages or [[[] for _ in range(cols)]]
+
+
 def shown_boards(snap):
     """Boards to page through: main always, the others while they have open tasks."""
     boards = snap.get("boards") or [snap]
@@ -666,13 +778,13 @@ def shown_boards(snap):
             or b["counts"]["ready"] + b["counts"]["progress"] + b["counts"]["waiting"]] or boards[:1]
 
 
-def frame(snap, err, page_no, w, h, space=None, space_err=None, now=None):
+def frame(snap, err, page_no, w, h, space=None, space_err=None, now=None, borrow=None, borrow_err=None):
     now_ts = time.time() if now is None else float(now)
     now_str = datetime.fromtimestamp(now_ts).astimezone().strftime("%a %d %b  %H:%M")
     badge = ROOM.badge() if ROOM else None
     side = ([badge, ("", " ")] if badge else []) + [(REV, " " + now_str + " ")]
     header = lambda title: render([(REV + BOLD, fit(" " + clean(title).upper() + " ", max(1, w - sum(width(t) for _, t in side) - 1)))] + side, w)
-    if not snap and not space and not space_err:
+    if not snap and not space and not space_err and not borrow and not borrow_err:
         lines = [header("Task Board"), render([(color("red", True), err or "")], w)]
         return lines + [" " * w] * (h - len(lines)), 1
 
@@ -700,6 +812,10 @@ def frame(snap, err, page_no, w, h, space=None, space_err=None, now=None):
         except (KeyError, ValueError, AttributeError):
             pass
 
+    borrow_extra = []
+    if countdown:
+        borrow_extra.append(render([(color("red", True), " >> " + countdown)], w))
+
     pages = []
     tab_names = []
     if snap:
@@ -721,8 +837,18 @@ def frame(snap, err, page_no, w, h, space=None, space_err=None, now=None):
         tab_names.append("space")
         pages.append(("space_err", None, None, max(4, h - 5)))
 
+    if borrow:
+        br_rows = max(4, h - (3 + len(borrow_extra)) - 2)
+        tab_names.append("borrow")
+        for p in borrow_layout(borrow, cols, colw, br_rows, now_ts):
+            pages.append(("borrow", borrow, p, br_rows))
+    elif borrow_err:
+        tab_names.append("borrow")
+        pages.append(("borrow_err", None, None, max(4, h - 5)))
+
     page_no %= len(pages)
     kind, obj, page, rows = pages[page_no]
+    borrow_hint = "  -  B borrow / R return" if borrow is not None else ""
 
     if kind == "board":
         c = obj["counts"]
@@ -733,12 +859,12 @@ def frame(snap, err, page_no, w, h, space=None, space_err=None, now=None):
                  *board_extra, " " * w]
         active_tab = clean(obj.get("name", "main"))
         updated = datetime.fromisoformat(snap["generatedAt"]).astimezone().strftime("%H:%M:%S")
-        footer = f"page {page_no + 1}/{len(pages)}  -  updated {updated}  -  claim tasks on Discord: Find Work, or !task"
+        footer = f"page {page_no + 1}/{len(pages)}  -  updated {updated}{borrow_hint}  -  Discord: Find Work, or !task"
     elif kind == "board_err":
         lines = [header("Task Board"), render([(color("red", True), " " + (err or ""))], w)]
         lines += [" " * w] * max(0, h - len(lines) - 2)
         active_tab = "main"
-        footer = f"page {page_no + 1}/{len(pages)}"
+        footer = f"page {page_no + 1}/{len(pages)}{borrow_hint}"
     elif kind == "space":
         loc_name = clean((obj.get("location") or {}).get("name") or "")
         title = f"Space Dashboard ({loc_name})" if loc_name else "Space Dashboard"
@@ -748,11 +874,26 @@ def frame(snap, err, page_no, w, h, space=None, space_err=None, now=None):
             supd = datetime.fromisoformat(obj["generatedAt"].replace("Z", "+00:00")).astimezone().strftime("%H:%M")
         except (KeyError, ValueError, AttributeError):
             supd = "?"
-        footer = f"page {page_no + 1}/{len(pages)}  -  space updated {supd}  -  Space/arrows to turn"
-    else:
+        footer = f"page {page_no + 1}/{len(pages)}  -  space updated {supd}{borrow_hint}  -  Space/arrows to turn"
+    elif kind == "space_err":
         lines = [header("Space Dashboard"), render([(color("red", True), " " + (space_err or ""))], w)]
         lines += [" " * w] * max(0, h - len(lines) - 2)
         active_tab = "space"
+        footer = f"page {page_no + 1}/{len(pages)}{borrow_hint}"
+    elif kind == "borrow":
+        n_out = len(obj.get("active") or [])
+        lines = [header("Borrowed Equipment"),
+                 render([(color("yellow", True), f" {n_out} currently out"), ("", "   "),
+                         (color("cyan", True), "Press B to borrow"), ("", "   "),
+                         (color("green", True), "R to return"), ("", "   "),
+                         (DIM, clean(BORROW_WEB_HINT))], w),
+                 *borrow_extra, " " * w]
+        active_tab = "borrow"
+        footer = f"page {page_no + 1}/{len(pages)}  -  B borrow  -  R return  -  {clean(BORROW_WEB_HINT)}"
+    else:
+        lines = [header("Borrowed Equipment"), render([(color("red", True), " " + (borrow_err or ""))], w)]
+        lines += [" " * w] * max(0, h - len(lines) - 2)
+        active_tab = "borrow"
         footer = f"page {page_no + 1}/{len(pages)}"
 
     if page is not None:
@@ -770,7 +911,12 @@ def frame(snap, err, page_no, w, h, space=None, space_err=None, now=None):
         tabs += [(REV + BOLD, f" {name} ") if name == active_tab else (DIM, f" {name} "), ("", " ")]
     lines.append(" " * w)
     lines.append(render([("", " ")] + (tabs + [("", "  ")] if len(tab_names) > 1 else []) + [(DIM, footer)], w))
-    return (ROOM.overlay(lines[:h], w, h) if ROOM else lines[:h]), len(pages)
+    out = lines[:h]
+    if BORROW:
+        out = BORROW.overlay(out, borrow, w, h, now_ts)
+    if ROOM:
+        out = ROOM.overlay(out, w, h)
+    return out, len(pages)
 
 
 def read_json(path):
@@ -858,6 +1004,320 @@ class Room:
 ROOM = None
 
 
+class BorrowUI:
+    """Interactive keyboard-only Borrow & Return form right on apollo's monitor."""
+
+    FIELDS = (
+        ("borrower", "Name",    "",    80),
+        ("discord",  "Discord", "",    60),
+        ("item",     "Item",    "",   120),
+        ("qty",      "Qty",     "1",   12),
+        ("unit",     "Units",   "pcs", 30),
+    )
+
+    def __init__(self, api_base=None):
+        self.api_base = (api_base or BORROW_API).rstrip("/")
+        self.mode = None            # None | "borrow" | "return" | "confirm_return"
+        self.values = {}
+        self.field_idx = 0
+        self.sel_idx = 0
+        self.confirm_loan = None
+        self.error = ""
+        self.last_activity = 0.0
+        self.flash = None           # (text, is_err, until_ts)
+
+    def active(self):
+        return self.mode is not None
+
+    def tick(self, now=None):
+        now = time.time() if now is None else float(now)
+        if self.mode and now - self.last_activity > BORROW_IDLE_SECONDS:
+            self.mode = None
+            self.error = ""
+        if self.flash and now >= self.flash[2]:
+            self.flash = None
+
+    def _open_borrow(self, now):
+        self.mode = "borrow"
+        self.values = {k: default for k, _, default, _ in self.FIELDS}
+        self.field_idx = 0
+        self.error = ""
+        self.last_activity = now
+
+    def _open_return(self, now):
+        self.mode = "return"
+        self.sel_idx = 0
+        self.confirm_loan = None
+        self.error = ""
+        self.last_activity = now
+
+    def _post_json(self, path, payload):
+        data = json.dumps(payload).encode("utf8")
+        req = urllib.request.Request(
+            self.api_base + path,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return json.loads(resp.read().decode("utf8")), None
+        except urllib.error.HTTPError as e:
+            try:
+                msg = json.loads(e.read().decode("utf8")).get("error") or f"HTTP {e.code}"
+            except Exception:
+                msg = f"HTTP {e.code}"
+            return None, msg
+        except Exception:
+            return None, "Borrow service offline - try again in a moment."
+
+    def _submit_borrow(self, now):
+        for idx, (key, label, _, _) in enumerate(self.FIELDS):
+            val = self.values.get(key, "").strip()
+            if not val:
+                self.field_idx = idx
+                self.error = f"{label} is required."
+                return
+        try:
+            qty = float(self.values["qty"].strip())
+            if qty <= 0:
+                raise ValueError
+        except ValueError:
+            self.field_idx = 3
+            self.error = "Qty must be a positive number."
+            return
+        payload = {
+            "borrower": self.values["borrower"].strip(),
+            "discord": self.values["discord"].strip(),
+            "item": self.values["item"].strip(),
+            "qty": qty,
+            "unit": self.values["unit"].strip() or "pcs",
+            "source": "kiosk",
+        }
+        loan, err = self._post_json("/api/loans", payload)
+        if err:
+            self.error = err
+            return
+        self.mode = None
+        self.error = ""
+        self.flash = (f"BORROWED: {loan['qtyText']} {loan['unit']} {loan['item']} ({loan['borrower']})",
+                      False, now + BORROW_FLASH_SECONDS)
+
+    def _submit_return(self, now):
+        loan = self.confirm_loan
+        if not loan:
+            self.mode = "return"
+            return
+        updated, err = self._post_json(f"/api/loans/{loan['id']}/return", {})
+        if err:
+            self.mode = "return"
+            self.error = err
+            return
+        self.mode = None
+        self.confirm_loan = None
+        self.error = ""
+        self.flash = (f"RETURNED: {updated['item']} ({updated['borrower']})",
+                      False, now + BORROW_FLASH_SECONDS)
+
+    def handle_key(self, key, borrow_data, now=None):
+        now = time.time() if now is None else float(now)
+        if self.mode is None:
+            if borrow_data is None and "ROCKY_BORROW_URL" not in os.environ:
+                return False
+            if key in BORROW_KEYS:
+                self._open_borrow(now)
+                return True
+            if key in RETURN_KEYS:
+                self._open_return(now)
+                return True
+            return False
+
+        self.last_activity = now
+        if self.mode == "borrow":
+            if key == b"\x1b":
+                self.mode = None
+                self.error = ""
+            elif key == b"\t":
+                self._open_return(now)
+            elif key == b"\x1b[A":
+                self.field_idx = max(0, self.field_idx - 1)
+                self.error = ""
+            elif key == b"\x1b[B":
+                self.field_idx = min(len(self.FIELDS) - 1, self.field_idx + 1)
+                self.error = ""
+            elif key in (b"\r", b"\n"):
+                if self.field_idx < len(self.FIELDS) - 1:
+                    self.field_idx += 1
+                    self.error = ""
+                else:
+                    self._submit_borrow(now)
+            elif key in (b"\x7f", b"\x08"):
+                fkey = self.FIELDS[self.field_idx][0]
+                self.values[fkey] = self.values.get(fkey, "")[:-1]
+                self.error = ""
+            elif len(key) == 1 and 32 <= key[0] <= 126:
+                ch = chr(key[0])
+                fkey, _, _, maxlen = self.FIELDS[self.field_idx]
+                cur = self.values.get(fkey, "")
+                if fkey == "qty" and ch not in "0123456789.":
+                    return True
+                if len(cur) < maxlen:
+                    self.values[fkey] = cur + ch
+                    self.error = ""
+            return True
+
+        active = [x for x in ((borrow_data or {}).get("active") or []) if isinstance(x, dict)]
+        if self.mode == "return":
+            if key == b"\x1b":
+                self.mode = None
+                self.error = ""
+            elif key == b"\t":
+                self._open_borrow(now)
+            elif key in (b"\x1b[A", b"k"):
+                self.sel_idx = max(0, self.sel_idx - 1)
+                self.error = ""
+            elif key in (b"\x1b[B", b"j"):
+                if active:
+                    self.sel_idx = min(len(active) - 1, self.sel_idx + 1)
+                self.error = ""
+            elif key in (b"\r", b"\n") and active:
+                self.sel_idx = min(self.sel_idx, len(active) - 1)
+                self.confirm_loan = active[self.sel_idx]
+                self.mode = "confirm_return"
+                self.error = ""
+            return True
+
+        if self.mode == "confirm_return":
+            if key in (b"\x1b", b"n", b"N"):
+                self.mode = "return"
+                self.confirm_loan = None
+            elif key in (b"\r", b"\n", b"y", b"Y"):
+                self._submit_return(now)
+            return True
+
+        return False
+
+    def overlay(self, lines, borrow_data, w, h, now=None):
+        now = time.time() if now is None else float(now)
+        self.tick(now)
+        out = list(lines)
+
+        if self.mode is None:
+            if not self.flash:
+                return out
+            msg, is_err, _ = self.flash
+            style = REV + color("red" if is_err else "green", True)
+            bw = min(w - 4, max(30, width(clean(msg)) + 4))
+            left = " " * ((w - bw) // 2)
+            row = max(1, h - 3)
+            if row < len(out):
+                out[row] = render([("", left), (style, fit("  " + clean(msg), bw))], w)
+            return out
+
+        bw = min(w - 4, 74)
+        inner = bw - 4
+        rows = []
+
+        def box_line(segs, border_style=color("cyan", True)):
+            return [(border_style, "| "), *segs, (border_style, " |")]
+
+        def full_row(segs, border_style=color("cyan", True)):
+            # Build exact width bw with borders
+            used = 0
+            mid = []
+            for st, txt in segs:
+                room = inner - used
+                if room <= 0:
+                    break
+                t = fit(txt, room) if width(txt) > room else txt
+                mid.append((st, t))
+                used += width(t)
+            if used < inner:
+                mid.append(("", " " * (inner - used)))
+            return [(border_style, "| "), *mid, (border_style, " |")]
+
+        border = color("yellow", True) if self.mode == "borrow" else color("green", True)
+        bar = [(border, "+" + "-" * (bw - 2) + "+")]
+        rows.append(bar)
+
+        if self.mode == "borrow":
+            title = " BORROW AN ITEM   (Tab: Return  |  Esc: Cancel) "
+            rows.append([(REV + color("yellow", True), fit(" " + title, bw))])
+            rows.append(full_row([("", "")], border))
+            for idx, (key, label, _, _) in enumerate(self.FIELDS):
+                focused = idx == self.field_idx
+                val = clean(self.values.get(key, ""))
+                box_w = max(12, inner - 14)
+                shown = val[-(box_w - 2):] if width(val) >= box_w - 1 else val
+                cursor = "_" if focused else ""
+                field_txt = f" {shown}{cursor}"
+                lbl_style = color("yellow", True) if focused else DIM
+                val_style = REV + BOLD if focused else ""
+                rows.append(full_row([
+                    (lbl_style, f"{'>' if focused else ' '} {label:<8} "),
+                    (val_style, fit(field_txt, box_w)),
+                ], border))
+            rows.append(full_row([("", "")], border))
+            if self.error:
+                rows.append(full_row([(color("red", True), "  ! " + clean(self.error))], border))
+            else:
+                rows.append(full_row([(DIM, "  Enter: next field (Enter on Units to submit)  |  Up/Down: move")], border))
+            rows.append(full_row([(DIM, f"  Shows up live at {clean(BORROW_WEB_HINT)}")], border))
+        elif self.mode == "return":
+            title = " RETURN AN ITEM   (Tab: Borrow  |  Esc: Cancel) "
+            rows.append([(REV + color("green", True), fit(" " + title, bw))])
+            rows.append(full_row([("", "")], border))
+            active = [x for x in ((borrow_data or {}).get("active") or []) if isinstance(x, dict)]
+            if not active:
+                rows.append(full_row([(DIM, "  Nothing is currently borrowed.")], border))
+            else:
+                self.sel_idx = min(self.sel_idx, len(active) - 1)
+                max_vis = max(3, min(8, h - 10))
+                start = max(0, self.sel_idx - max_vis + 1)
+                for i in range(start, min(len(active), start + max_vis)):
+                    loan = active[i]
+                    sel = i == self.sel_idx
+                    qty = clean(loan.get("remainingText") or loan.get("qtyText") or "1")
+                    unit = clean(loan.get("unit") or "pcs")
+                    item = clean(loan.get("item") or "item")
+                    who = clean(loan.get("borrower") or "?")
+                    disc = clean(loan.get("discord") or "")
+                    age = fmt_age(loan.get("borrowedAt"), now)
+                    txt = f"{'> ' if sel else '  '}{item} ({qty} {unit}) - {who}"
+                    if disc:
+                        txt += f" @{disc}"
+                    if age:
+                        txt += f" [{age}]"
+                    rows.append(full_row([(REV + BOLD if sel else "", fit(txt, inner))], border))
+            rows.append(full_row([("", "")], border))
+            if self.error:
+                rows.append(full_row([(color("red", True), "  ! " + clean(self.error))], border))
+            else:
+                rows.append(full_row([(DIM, "  Up/Down: pick item  |  Enter: mark returned  |  Esc: cancel")], border))
+        else:
+            loan = self.confirm_loan or {}
+            title = " CONFIRM RETURN "
+            rows.append([(REV + color("green", True), fit(" " + title, bw))])
+            rows.append(full_row([("", "")], border))
+            qty = clean(loan.get("remainingText") or loan.get("qtyText") or "1")
+            unit = clean(loan.get("unit") or "pcs")
+            rows.append(full_row([(BOLD, f"  Return {qty} {unit} {clean(loan.get('item') or '')}?")], border))
+            rows.append(full_row([(DIM, f"  Borrowed by {clean(loan.get('borrower') or '')} (@{clean(loan.get('discord') or '')})")], border))
+            rows.append(full_row([("", "")], border))
+            rows.append(full_row([(color("green", True), "  Enter / Y: confirm return   "), (DIM, "Esc / N: back")], border))
+
+        rows.append(bar)
+        top = max(1, (h - len(rows)) // 2)
+        left = " " * ((w - bw) // 2)
+        for i, segs in enumerate(rows):
+            if top + i < len(out):
+                out[top + i] = render([("", left)] + segs, w)
+        return out
+
+
+BORROW = None
+
+
 def split_keys(data):
     """Bytes read from the keyboard as separate keys (a held key arrives several to a read)."""
     return re.findall(rb"\x1b\[[0-9;]*[~A-Za-z]|\x1b|.", data, re.S)
@@ -867,10 +1327,12 @@ def main():
     if ONCE:
         snap, err = load()
         space, space_err = load_space()
+        borrow, borrow_err = load_borrow()
         w, h = shutil.get_terminal_size((100, 40))
         out, page, npages = [], 0, 1
         while page < npages:                           # one page per board here
-            lines, npages = frame(snap, err, page, w, 10_000, space=space, space_err=space_err)
+            lines, npages = frame(snap, err, page, w, 10_000, space=space, space_err=space_err,
+                                  borrow=borrow, borrow_err=borrow_err)
             out.append("\n".join(l.rstrip() for l in lines).rstrip())
             page += 1
         try:
@@ -893,8 +1355,9 @@ def main():
 
     if fd is not None:
         termios.tcflush(fd, termios.TCIFLUSH)          # drop keys typed before the board started
-    global ROOM
+    global ROOM, BORROW
     ROOM = Room()
+    BORROW = BorrowUI()
     page, page_started, hold, last_size = 0, time.time(), PAGE_SECONDS, None
     try:
         while True:
@@ -904,27 +1367,35 @@ def main():
                 last_size = (w, h)
             snap, err = load()
             space, space_err = load_space()
+            borrow, borrow_err = load_borrow()
             ROOM.poll()
+            BORROW.tick()
             try:
-                lines, npages = frame(snap, err, page, w, h, space=space, space_err=space_err)
+                lines, npages = frame(snap, err, page, w, h, space=space, space_err=space_err,
+                                      borrow=borrow, borrow_err=borrow_err)
             except Exception as e:                     # bad data must never take the board down
                 traceback.print_exc()
                 lines, npages = frame(None, f"Board data couldn't be shown ({type(e).__name__}). Retrying...", 0, w, h)
             sys.stdout.write("\033[H" + "\n".join(lines) + "\033[J")
             sys.stdout.flush()
 
-            ready = select.select([fd], [], [], 1.0)[0] if fd is not None else time.sleep(1.0)
+            wait = 0.25 if BORROW.active() else 1.0
+            ready = select.select([fd], [], [], wait)[0] if fd is not None else time.sleep(wait)
             if ready:
                 data = os.read(fd, 64)
                 if not data:                           # keyboard gone: keep showing the board
                     fd = None
                 turned = False
                 for key in split_keys(data):
-                    if not KIOSK and key in (b"q", b"Q", b"\x1b"):
-                        return
                     if ROOM.buzz:                      # first key just dismisses the buzz box
                         ROOM.buzz, turned = None, True
                         continue
+                    if BORROW.handle_key(key, borrow):
+                        turned = True
+                        page_started = time.time()
+                        continue
+                    if not KIOSK and key in (b"q", b"Q", b"\x1b"):
+                        return
                     if key in SHOP_KEYS:
                         ROOM.toggle_shop()
                         turned = True
@@ -935,7 +1406,9 @@ def main():
                         page_started, hold = time.time(), HOLD_SECONDS if KIOSK else PAGE_SECONDS
                 if turned:
                     continue                           # show the new page right away
-            if time.time() - page_started >= hold:
+            if BORROW.active():
+                page_started = time.time()
+            elif time.time() - page_started >= hold:
                 page, page_started, hold = (page + 1) % max(1, npages), time.time(), PAGE_SECONDS
     except KeyboardInterrupt:
         pass
