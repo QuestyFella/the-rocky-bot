@@ -43,6 +43,36 @@ systemctl daemon-reload
 systemctl enable --now rocky-space-export.timer
 systemctl start --no-block rocky-space-export.service
 
+echo "== apollo-sso (club-wide SSO via Gitea OAuth2/OIDC)"
+id apollo-sso >/dev/null 2>&1 ||
+    useradd --system --home-dir /nonexistent --no-create-home --shell /usr/bin/nologin apollo-sso
+install -d -o root -g apollo-sso -m 0750 /etc/apollo-sso
+if [ ! -f /etc/apollo-sso/config.json ]; then
+    python3 - <<'EOF'
+import json, os, secrets
+cfg = {
+    "client_id": "",
+    "client_secret": "",
+    "session_secret": secrets.token_hex(32),
+    "gitea_public_url": "http://10.16.26.107/gitea",
+    "gitea_internal_url": "http://127.0.0.1:3000",
+    "redirect_uri": "http://10.16.26.107/sso/callback",
+    "session_ttl": 604800,
+}
+with open("/etc/apollo-sso/config.json", "w", encoding="utf8") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+EOF
+    chown root:apollo-sso /etc/apollo-sso/config.json
+    chmod 0640 /etc/apollo-sso/config.json
+    echo "created /etc/apollo-sso/config.json (run: sudo apollo-sso --configure)"
+fi
+install -m 0755 apollo-sso /usr/local/bin/apollo-sso
+install -m 0644 apollo-sso.service /etc/systemd/system/apollo-sso.service
+systemctl daemon-reload
+systemctl enable apollo-sso
+systemctl restart apollo-sso
+
 echo "== apollo-borrow (equipment borrow tracker web UI + kiosk form)"
 id apollo-borrow >/dev/null 2>&1 ||
     useradd --system --home-dir /var/lib/apollo-borrow --no-create-home --shell /usr/bin/nologin apollo-borrow
@@ -53,22 +83,60 @@ systemctl daemon-reload
 systemctl enable apollo-borrow
 systemctl restart apollo-borrow
 
-if [ -f /etc/nginx/nginx.conf ] && ! grep -q "location \^~ /borrow/" /etc/nginx/nginx.conf; then
-    cp -p /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak-borrow
+if [ -f /etc/nginx/nginx.conf ] && ! grep -q "location \^~ /sso/" /etc/nginx/nginx.conf; then
+    cp -p /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak-sso-borrow
     python3 - <<'EOF'
 path = "/etc/nginx/nginx.conf"
 text = open(path, encoding="utf8").read()
 block = """
+        # Club-wide SSO (Gitea OAuth2/OIDC): /sso/ -> 127.0.0.1:3005
+        location = /sso {
+            return 301 /sso/;
+        }
+        location ^~ /sso/ {
+            proxy_pass http://127.0.0.1:3005/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+        location = /_sso_check {
+            internal;
+            proxy_pass http://127.0.0.1:3005/verify;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Cookie $http_cookie;
+        }
+        location = /_sso_optional {
+            internal;
+            proxy_pass http://127.0.0.1:3005/verify?optional=1;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Cookie $http_cookie;
+        }
+        location @sso_login {
+            return 302 /sso/login?next=$request_uri;
+        }
+
         # Club equipment borrow tracker: /borrow/ -> 127.0.0.1:3010
         location = /borrow {
             return 301 /borrow/;
         }
         location ^~ /borrow/ {
+            auth_request /_sso_optional;
+            auth_request_set $apollo_sso $upstream_http_x_apollo_sso;
+            auth_request_set $apollo_user $upstream_http_x_apollo_user;
+            auth_request_set $apollo_name $upstream_http_x_apollo_name;
+            auth_request_set $apollo_admin $upstream_http_x_apollo_admin;
             proxy_pass http://127.0.0.1:3010/;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Apollo-SSO $apollo_sso;
+            proxy_set_header X-Apollo-User $apollo_user;
+            proxy_set_header X-Apollo-Name $apollo_name;
+            proxy_set_header X-Apollo-Admin $apollo_admin;
         }
 """
 marker = "        # Never serve dotfiles"
@@ -82,10 +150,10 @@ open(path, "w", encoding="utf8").write(updated)
 EOF
     if nginx -t; then
         systemctl reload nginx
-        echo "nginx: added /borrow/ proxy and reloaded"
+        echo "nginx: added /sso/ and /borrow/ proxies and reloaded"
     else
-        cp -p /etc/nginx/nginx.conf.bak-borrow /etc/nginx/nginx.conf
-        echo "ERROR: nginx -t failed after adding /borrow/; restored backup." >&2
+        cp -p /etc/nginx/nginx.conf.bak-sso-borrow /etc/nginx/nginx.conf
+        echo "ERROR: nginx -t failed after adding /sso/ and /borrow/; restored backup." >&2
         exit 1
     fi
 fi

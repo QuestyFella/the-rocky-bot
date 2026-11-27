@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""apollo-sso: lightweight club-wide SSO for apollo backed by Gitea's OAuth2/OIDC provider.
+
+Runs on 127.0.0.1:3005 behind nginx at /sso/ and serves nginx auth_request subrequests at /verify.
+Any app behind nginx can read verified headers:
+  X-Apollo-User    Gitea username (e.g. qstyban)
+  X-Apollo-Name    Display name (e.g. Alex Rivera)
+  X-Apollo-Groups  Comma-separated Gitea org:team groups
+  X-Apollo-Admin   "1" if member of any :Owners team, else "0"
+
+Config: /etc/apollo-sso/config.json (mode 0640, root:apollo-sso).
+"""
+import base64
+import hashlib
+import hmac
+import html
+import json
+import os
+import secrets
+import signal
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HOST = os.environ.get("APOLLO_SSO_HOST", "127.0.0.1")
+PORT = int(os.environ.get("APOLLO_SSO_PORT", "3005"))
+CONFIG_PATH = os.environ.get("APOLLO_SSO_CONFIG", "/etc/apollo-sso/config.json")
+
+SESSION_COOKIE = "apollo_session"
+STATE_COOKIE = "apollo_sso_state"
+STATE_TTL = 600
+DEFAULT_SESSION_TTL = 7 * 86400
+
+
+def b64u_encode(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def b64u_decode(text):
+    pad = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(text + pad)
+
+
+def sign_token(payload, secret):
+    body = b64u_encode(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf8"))
+    sig = hmac.new(secret.encode("utf8"), body.encode("ascii"), hashlib.sha256).digest()
+    return body + "." + b64u_encode(sig)
+
+
+def verify_token(token, secret, now=None):
+    if not token or "." not in token or not secret:
+        return None
+    body, sig_b64 = token.split(".", 1)
+    expected = b64u_encode(hmac.new(secret.encode("utf8"), body.encode("ascii"), hashlib.sha256).digest())
+    if not hmac.compare_digest(sig_b64, expected):
+        return None
+    try:
+        data = json.loads(b64u_decode(body).decode("utf8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    now = time.time() if now is None else float(now)
+    if float(data.get("exp") or 0) <= now:
+        return None
+    return data
+
+
+def safe_next(target):
+    """Allow only local relative paths (never //evil.com or external URLs)."""
+    s = str(target or "/").strip()
+    if not s.startswith("/") or s.startswith("//") or "\\" in s or "\r" in s or "\n" in s:
+        return "/"
+    return s
+
+
+def pkce_challenge(verifier):
+    return b64u_encode(hashlib.sha256(verifier.encode("ascii")).digest())
+
+
+def is_admin_groups(groups):
+    return any(str(g).lower().endswith(":owners") for g in (groups or []))
+
+
+def clean_header_value(value):
+    return " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())[:120]
+
+
+def load_config(path=CONFIG_PATH):
+    try:
+        with open(path, encoding="utf8") as f:
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def is_configured(cfg):
+    return bool(
+        cfg.get("client_id")
+        and cfg.get("client_secret")
+        and cfg.get("session_secret")
+        and cfg.get("gitea_public_url")
+        and cfg.get("redirect_uri")
+    )
+
+
+def render_page(title, body_html):
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>~apollo / {html.escape(title)}</title>
+<style>
+  :root {{ --bg: #0b0807; --panel: #140e0b; --fg: #eadfd5; --dim: #8b7b70; --red: #e8432f; --orange: #ff8d21; --green: #69c96f; --line: #3b1c13; }}
+  * {{ box-sizing: border-box; }}
+  html {{ background: var(--bg); }}
+  body {{ margin: 0; color: var(--fg); font: 15px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }}
+  main {{ max-width: 38rem; margin: 3rem auto; padding: 0 1.25rem; }}
+  h1 {{ margin: 0 0 .5rem; font-size: 1.4rem; color: var(--orange); }}
+  h1 a {{ color: var(--dim); text-decoration: none; font-weight: normal; }}
+  .card {{ background: var(--panel); border: 1px solid var(--line); padding: 1.15rem; margin-top: 1.2rem; }}
+  .dim {{ color: var(--dim); }}
+  .ok {{ color: var(--green); }}
+  .err {{ color: var(--red); }}
+  code {{ color: var(--orange); }}
+  a.btn {{ display: inline-block; margin-top: .8rem; margin-right: .6rem; padding: .45rem .9rem; background: var(--orange); color: var(--bg); text-decoration: none; font-weight: bold; }}
+  a.btn.sec {{ background: transparent; color: var(--fg); border: 1px solid var(--line); font-weight: normal; }}
+  a.btn:hover {{ filter: brightness(1.08); }}
+  ul {{ margin: .6rem 0 0; padding-left: 1.2rem; }}
+</style>
+</head>
+<body>
+<main>
+  <h1><a href="/">~apollo</a> / sso</h1>
+  <div class="card">{body_html}</div>
+</main>
+</body>
+</html>"""
+
+
+class GiteaClient:
+    """Server-to-server OAuth2 code exchange and OIDC userinfo lookup against Gitea."""
+
+    def exchange_and_userinfo(self, cfg, code, verifier):
+        internal = str(cfg.get("gitea_internal_url") or cfg["gitea_public_url"]).rstrip("/")
+        form = urllib.parse.urlencode({
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "code": code,
+            "redirect_uri": cfg["redirect_uri"],
+            "code_verifier": verifier,
+            "grant_type": "authorization_code",
+        }).encode("utf8")
+        req = urllib.request.Request(
+            internal + "/login/oauth/access_token",
+            data=form,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            tok = json.loads(resp.read().decode("utf8"))
+        access_token = tok.get("access_token")
+        if not access_token:
+            raise RuntimeError(tok.get("error_description") or tok.get("error") or "no access_token returned")
+
+        ureq = urllib.request.Request(
+            internal + "/login/oauth/userinfo",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(ureq, timeout=10) as resp:
+            info = json.loads(resp.read().decode("utf8"))
+        user = clean_header_value(info.get("preferred_username") or info.get("sub") or "")
+        if not user:
+            raise RuntimeError("userinfo missing preferred_username")
+        name = clean_header_value(info.get("name") or user)
+        groups = [clean_header_value(g) for g in (info.get("groups") or []) if g]
+        return {"u": user, "n": name, "g": groups}
+
+
+def make_handler(config_loader=load_config, gitea=None):
+    gitea = gitea or GiteaClient()
+
+    class SSOHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+            sys.stderr.flush()
+
+        def _cookies(self):
+            c = SimpleCookie()
+            raw = self.headers.get("Cookie")
+            if raw:
+                try:
+                    c.load(raw)
+                except Exception:
+                    pass
+            return {k: m.value for k, m in c.items()}
+
+        def _session(self, cfg):
+            tok = self._cookies().get(SESSION_COOKIE)
+            return verify_token(tok, cfg.get("session_secret") or "")
+
+        def _send(self, code, body, content_type, headers=None, cookies=None):
+            data = body.encode("utf8") if isinstance(body, str) else body
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
+            for c in (cookies or []):
+                self.send_header("Set-Cookie", c)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _redirect(self, location, cookies=None):
+            self._send(302, "", "text/plain; charset=utf-8", {"Location": location}, cookies=cookies)
+
+        def _cookie_str(self, name, value, path="/", max_age=None):
+            parts = [f"{name}={value}", f"Path={path}", "HttpOnly", "SameSite=Lax"]
+            if max_age is not None:
+                parts.append(f"Max-Age={int(max_age)}")
+            if self.headers.get("X-Forwarded-Proto") == "https":
+                parts.append("Secure")
+            return "; ".join(parts)
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            qs = urllib.parse.parse_qs(parsed.query)
+            cfg = config_loader()
+
+            if path == "/health":
+                self._send(200, json.dumps({"ok": True, "configured": is_configured(cfg)}), "application/json; charset=utf-8")
+                return
+
+            if path == "/verify":
+                optional = (qs.get("optional") or [""])[0] == "1"
+                configured = is_configured(cfg)
+                sess = self._session(cfg) if configured else None
+                if sess:
+                    groups = sess.get("g") or []
+                    hdrs = {
+                        "X-Apollo-SSO": "1",
+                        "X-Apollo-User": clean_header_value(sess.get("u")),
+                        "X-Apollo-Name": clean_header_value(sess.get("n") or sess.get("u")),
+                        "X-Apollo-Groups": ",".join(clean_header_value(g) for g in groups),
+                        "X-Apollo-Admin": "1" if is_admin_groups(groups) else "0",
+                    }
+                    self._send(200, "", "text/plain; charset=utf-8", hdrs)
+                elif optional:
+                    self._send(200, "", "text/plain; charset=utf-8", {
+                        "X-Apollo-SSO": "1" if configured else "0",
+                        "X-Apollo-User": "", "X-Apollo-Name": "", "X-Apollo-Groups": "", "X-Apollo-Admin": "0",
+                    })
+                else:
+                    self._send(401, "Unauthorized", "text/plain; charset=utf-8")
+                return
+
+            if path == "/whoami":
+                sess = self._session(cfg) if is_configured(cfg) else None
+                if sess:
+                    groups = sess.get("g") or []
+                    obj = {
+                        "configured": True,
+                        "authenticated": True,
+                        "user": sess.get("u"),
+                        "name": sess.get("n") or sess.get("u"),
+                        "groups": groups,
+                        "admin": is_admin_groups(groups),
+                    }
+                else:
+                    obj = {"configured": is_configured(cfg), "authenticated": False}
+                self._send(200, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
+                return
+
+            if path == "/login":
+                if not is_configured(cfg):
+                    body = (
+                        "<p class='err'>Apollo SSO is not configured yet.</p>"
+                        "<p class='dim'>Create an OAuth2 application in Gitea with redirect URI "
+                        "<code>http://10.16.26.107/sso/callback</code>, then save its client ID and secret "
+                        "in <code>/etc/apollo-sso/config.json</code>.</p>"
+                        "<a class='btn sec' href='/'>Back to apollo</a>"
+                    )
+                    self._send(503, render_page("sso setup", body), "text/html; charset=utf-8")
+                    return
+                nxt = safe_next((qs.get("next") or ["/"])[0])
+                state = secrets.token_urlsafe(24)
+                verifier = secrets.token_urlsafe(32)
+                st_tok = sign_token(
+                    {"state": state, "verifier": verifier, "next": nxt, "exp": int(time.time()) + STATE_TTL},
+                    cfg["session_secret"],
+                )
+                params = urllib.parse.urlencode({
+                    "client_id": cfg["client_id"],
+                    "redirect_uri": cfg["redirect_uri"],
+                    "response_type": "code",
+                    "scope": "openid profile email groups",
+                    "state": state,
+                    "code_challenge": pkce_challenge(verifier),
+                    "code_challenge_method": "S256",
+                })
+                auth_url = cfg["gitea_public_url"].rstrip("/") + "/login/oauth/authorize?" + params
+                self._redirect(auth_url, cookies=[self._cookie_str(STATE_COOKIE, st_tok, path="/sso/", max_age=STATE_TTL)])
+                return
+
+            if path == "/callback":
+                if not is_configured(cfg):
+                    self._send(503, render_page("sso error", "<p class='err'>SSO not configured.</p>"), "text/html; charset=utf-8")
+                    return
+                if qs.get("error"):
+                    err_txt = html.escape((qs.get("error_description") or qs["error"])[0])
+                    body = f"<p class='err'>Gitea sign-in cancelled or denied: {err_txt}</p><a class='btn sec' href='/'>Back</a>"
+                    self._send(400, render_page("sign-in error", body), "text/html; charset=utf-8")
+                    return
+                code = (qs.get("code") or [""])[0]
+                state = (qs.get("state") or [""])[0]
+                st_data = verify_token(self._cookies().get(STATE_COOKIE), cfg["session_secret"])
+                if not code or not st_data or not hmac.compare_digest(state, str(st_data.get("state") or "")):
+                    body = (
+                        "<p class='err'>Sign-in session expired or invalid state.</p>"
+                        "<a class='btn' href='/sso/login'>Try again</a>"
+                    )
+                    self._send(400, render_page("sign-in error", body), "text/html; charset=utf-8")
+                    return
+                try:
+                    profile = gitea.exchange_and_userinfo(cfg, code, st_data["verifier"])
+                except Exception as e:
+                    sys.stderr.write(f"OAuth2 callback failed: {e}\n")
+                    sys.stderr.flush()
+                    body = (
+                        f"<p class='err'>Could not complete Gitea sign-in ({html.escape(type(e).__name__)}).</p>"
+                        "<a class='btn' href='/sso/login'>Try again</a>"
+                    )
+                    self._send(502, render_page("sign-in error", body), "text/html; charset=utf-8")
+                    return
+                ttl = int(cfg.get("session_ttl") or DEFAULT_SESSION_TTL)
+                profile["exp"] = int(time.time()) + ttl
+                sess_tok = sign_token(profile, cfg["session_secret"])
+                cookies = [
+                    self._cookie_str(SESSION_COOKIE, sess_tok, path="/", max_age=ttl),
+                    self._cookie_str(STATE_COOKIE, "", path="/sso/", max_age=0),
+                ]
+                self._redirect(safe_next(st_data.get("next")), cookies=cookies)
+                return
+
+            if path == "/logout":
+                nxt = safe_next((qs.get("next") or ["/"])[0])
+                self._redirect(nxt, cookies=[self._cookie_str(SESSION_COOKIE, "", path="/", max_age=0)])
+                return
+
+            if path in ("/", "/index.html"):
+                if not is_configured(cfg):
+                    body = (
+                        "<p class='err'>Gitea OAuth2 is not configured yet.</p>"
+                        "<p class='dim'>Add <code>client_id</code> and <code>client_secret</code> to "
+                        "<code>/etc/apollo-sso/config.json</code> and restart <code>apollo-sso</code>.</p>"
+                    )
+                else:
+                    sess = self._session(cfg)
+                    if sess:
+                        u = html.escape(sess.get("u") or "")
+                        n = html.escape(sess.get("n") or u)
+                        groups = sess.get("g") or []
+                        g_html = "".join(f"<li><code>{html.escape(g)}</code></li>" for g in groups) or "<li class='dim'>none</li>"
+                        body = (
+                            f"<p class='ok'>Signed in as <strong>{n}</strong> (<code>@{u}</code>)</p>"
+                            f"<p class='dim'>Teams:</p><ul>{g_html}</ul>"
+                            "<a class='btn' href='/borrow/'>Borrow Tracker</a>"
+                            "<a class='btn sec' href='/gitea/'>Gitea</a>"
+                            "<a class='btn sec' href='/sso/logout?next=/sso/'>Sign out</a>"
+                        )
+                    else:
+                        body = (
+                            "<p>Sign in once with your UofG Rocketry Gitea account to use club tools on apollo.</p>"
+                            "<a class='btn' href='/sso/login?next=/sso/'>Sign in with Apollo Gitea</a>"
+                            "<a class='btn sec' href='/borrow/'>View Borrow Tracker</a>"
+                        )
+                self._send(200, render_page("sso", body), "text/html; charset=utf-8")
+                return
+
+            self._send(404, "Not found", "text/plain; charset=utf-8")
+
+    return SSOHandler
+
+
+def configure_cli():
+    """Interactive helper (run with sudo): saves Gitea OAuth2 Client ID & Secret to CONFIG_PATH."""
+    cfg = load_config(CONFIG_PATH)
+    print(f"Configuring Apollo SSO ({CONFIG_PATH})")
+    print("In Gitea -> Settings / Site Admin -> Applications -> Create OAuth2 Application:")
+    print("  Application Name: Apollo SSO")
+    print("  Redirect URI:     http://10.16.26.107/sso/callback")
+    print("  Confidential:     checked")
+    print()
+    cid = input(f"Client ID [{cfg.get('client_id') or ''}]: ").strip() or cfg.get("client_id") or ""
+    csec = input("Client Secret (leave blank to keep existing): ").strip() or cfg.get("client_secret") or ""
+    if not (cid and csec):
+        print("Both Client ID and Client Secret are required.", file=sys.stderr)
+        sys.exit(1)
+    cfg.update({
+        "client_id": cid,
+        "client_secret": csec,
+        "session_secret": cfg.get("session_secret") or secrets.token_hex(32),
+        "gitea_public_url": cfg.get("gitea_public_url") or "http://10.16.26.107/gitea",
+        "gitea_internal_url": cfg.get("gitea_internal_url") or "http://127.0.0.1:3000",
+        "redirect_uri": cfg.get("redirect_uri") or "http://10.16.26.107/sso/callback",
+        "session_ttl": int(cfg.get("session_ttl") or DEFAULT_SESSION_TTL),
+    })
+    os.makedirs(os.path.dirname(os.path.abspath(CONFIG_PATH)), exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.chmod(tmp, 0o640)
+    os.replace(tmp, CONFIG_PATH)
+    print(f"Saved {CONFIG_PATH}. Restart with: sudo systemctl restart apollo-sso")
+
+
+def main():
+    if "--configure" in sys.argv:
+        configure_cli()
+        return
+    server = ThreadingHTTPServer((HOST, PORT), make_handler())
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
+    print(f"apollo-sso listening on http://{HOST}:{PORT} (config: {CONFIG_PATH})", file=sys.stderr, flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

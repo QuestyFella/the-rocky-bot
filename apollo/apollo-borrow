@@ -334,11 +334,16 @@ HTML_PAGE = """<!doctype html>
       <a href="/">home</a>
       <a href="/gitea/">gitea</a>
       <a href="./api/export.csv">export csv</a>
+      <span id="sso-nav"></span>
     </nav>
   </header>
   <p class="sub">Club room equipment tracker &middot; press <code>B</code> on apollo's keyboard or use this form to log borrowed gear.</p>
 
   <h2>borrow an item <small id="pin-hint"></small></h2>
+  <div id="sso-gate" style="display:none; background:var(--panel); border:1px solid var(--line); padding:1rem; margin-bottom:1rem;">
+    <span>Sign in with your club Gitea account to borrow or return items from the web.</span>
+    <a href="/sso/login?next=/borrow/" style="margin-left:.8rem; color:var(--bg); background:var(--orange); padding:.3rem .7rem; text-decoration:none; font-weight:bold;">Sign in with Apollo Gitea</a>
+  </div>
   <form class="borrow-form" id="borrow-form" autocomplete="off">
     <div class="field">
       <label for="f-borrower">Name</label>
@@ -462,9 +467,35 @@ function render() {
   $("tab-active").classList.toggle("active", tab === "active");
   $("tab-history").classList.toggle("active", tab === "history");
 
-  $("pin-field").classList.toggle("show", !!state.pinRequired);
-  $("pin-hint").textContent = state.pinRequired ? "PIN required for web changes" : "campus LAN";
-  if (state.pinRequired && !$("f-pin").value) {
+  $("pin-field").classList.toggle("show", !!state.pinRequired && !(state.auth && state.auth.ssoEnabled));
+  const auth = state.auth || {};
+  const ssoNav = $("sso-nav");
+  ssoNav.replaceChildren();
+  if (auth.ssoEnabled) {
+    if (auth.authenticated) {
+      const span = document.createElement("span");
+      span.style.color = "var(--green)";
+      span.textContent = "@" + auth.user + " ";
+      const out = document.createElement("a");
+      out.href = "/sso/logout?next=/borrow/";
+      out.textContent = "sign out";
+      ssoNav.append(span, out);
+      if (!$("f-borrower").value && auth.name) $("f-borrower").value = auth.name;
+    } else {
+      const link = document.createElement("a");
+      link.href = "/sso/login?next=/borrow/";
+      link.style.color = "var(--orange)";
+      link.textContent = "sign in";
+      ssoNav.appendChild(link);
+    }
+  }
+  const needsLogin = !!(auth.ssoEnabled && !auth.authenticated);
+  $("sso-gate").style.display = needsLogin ? "block" : "none";
+  $("borrow-form").style.display = needsLogin ? "none" : "grid";
+  $("pin-hint").textContent = auth.ssoEnabled
+    ? (auth.authenticated ? "signed in as " + (auth.name || auth.user) : "Gitea SSO required")
+    : (state.pinRequired ? "PIN required for web changes" : "campus LAN");
+  if (state.pinRequired && !auth.ssoEnabled && !$("f-pin").value) {
     $("f-pin").value = localStorage.getItem("apolloBorrowPin") || "";
   }
 
@@ -529,12 +560,20 @@ function render() {
 
     const tdAct = document.createElement("td");
     if (tab === "active") {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ret";
-      btn.textContent = "Return";
-      btn.addEventListener("click", () => handleReturn(loan));
-      tdAct.appendChild(btn);
+      if (needsLogin) {
+        const sign = document.createElement("a");
+        sign.href = "/sso/login?next=/borrow/";
+        sign.className = "meta";
+        sign.textContent = "sign in";
+        tdAct.appendChild(sign);
+      } else {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ret";
+        btn.textContent = "Return";
+        btn.addEventListener("click", () => handleReturn(loan));
+        tdAct.appendChild(btn);
+      }
     } else {
       const done = document.createElement("span");
       done.className = "meta";
@@ -682,21 +721,43 @@ def make_handler(store):
         def _is_proxied(self):
             return bool(self.headers.get("X-Forwarded-For"))
 
-        def _check_pin(self, payload):
+        def _auth_info(self):
+            sso_enabled = (self.headers.get("X-Apollo-SSO") or "").strip() == "1"
+            user = clean_text(self.headers.get("X-Apollo-User") or "", 80)
+            name = clean_text(self.headers.get("X-Apollo-Name") or "", 80) or user
+            admin = (self.headers.get("X-Apollo-Admin") or "").strip() == "1"
+            return {
+                "ssoEnabled": sso_enabled,
+                "authenticated": bool(user),
+                "user": user,
+                "name": name,
+                "admin": admin,
+            }
+
+        def _check_write_auth(self, payload):
             if not self._is_proxied():
-                return True
+                return 200, None
+            auth = self._auth_info()
+            if auth["ssoEnabled"]:
+                if not auth["authenticated"]:
+                    return 401, "Sign in with Apollo Gitea to borrow or return items."
+                return 200, None
             required = store.read_pin()
             if not required:
-                return True
+                return 200, None
             supplied = (self.headers.get("X-Borrow-Pin") or str(payload.get("pin") or "")).strip()
-            return hmac.compare_digest(supplied, required)
+            if not hmac.compare_digest(supplied, required):
+                return 403, "Invalid club PIN."
+            return 200, None
 
         def do_GET(self):
             path = urlparse(self.path).path
             if path in ("/", "/index.html"):
                 self._send(200, HTML_PAGE, "text/html; charset=utf-8")
             elif path == "/api/loans":
-                self._send_json(200, store.get_state())
+                state = store.get_state()
+                state["auth"] = self._auth_info()
+                self._send_json(200, state)
             elif path == "/api/export.csv":
                 buf = io.StringIO()
                 w = csv.writer(buf)
@@ -723,8 +784,9 @@ def make_handler(store):
             if err:
                 self._send_json(400, {"error": err})
                 return
-            if not self._check_pin(payload):
-                self._send_json(403, {"error": "Invalid club PIN."})
+            auth_code, auth_err = self._check_write_auth(payload)
+            if auth_err:
+                self._send_json(auth_code, {"error": auth_err})
                 return
 
             if path == "/api/loans":
