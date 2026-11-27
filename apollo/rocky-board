@@ -4,8 +4,8 @@
   rocky-board            live board (q to quit, space / arrows / PgUp / PgDn to change page)
   rocky-board --once     print the board once and exit
   rocky-board --kiosk    apollo's monitor mode (used by rocky-board-kiosk.service): only the
-                         page keys work, and a page turned by hand stays up for a minute.
-                         It also shows !buzz from Discord (apollo-sound plays the tune) and S flips the shop sign.
+                         page keys work (no auto-switching), B/R open the borrow/return form,
+                         !buzz shows an overlay (apollo-sound plays the tune), and S flips the shop sign.
 
 Reads the snapshot written by rocky-board-export (refreshed every 15 seconds).
 """
@@ -73,8 +73,8 @@ BORROW_KEYS = (b"b", b"B")
 RETURN_KEYS = (b"r", b"R")
 BORROW_IDLE_SECONDS = 120
 BORROW_FLASH_SECONDS = 5
-PAGE_SECONDS = 12
-HOLD_SECONDS = 60          # on the monitor, after someone turns the page by hand
+PAGE_SECONDS = int(os.environ.get("ROCKY_PAGE_SECONDS", "0"))   # 0 = stay on the current page (manual turn only)
+HOLD_SECONDS = 60          # when auto-switching is enabled, how long a manual page turn stays up
 NEXT_KEYS = (b" ", b"\x1b[C", b"\x1b[B", b"\x1b[6~", b"n", b"j", b"l")     # right, down, PgDn
 PREV_KEYS = (b"\x1b[D", b"\x1b[A", b"\x1b[5~", b"p", b"k", b"h")           # left, up, PgUp
 STALE_SECONDS = 120
@@ -1406,7 +1406,7 @@ def main():
                         page_started, hold = time.time(), HOLD_SECONDS if KIOSK else PAGE_SECONDS
                 if turned:
                     continue                           # show the new page right away
-            if BORROW.active():
+            if BORROW.active() or PAGE_SECONDS <= 0:
                 page_started = time.time()
             elif time.time() - page_started >= hold:
                 page, page_started, hold = (page + 1) % max(1, npages), time.time(), PAGE_SECONDS
