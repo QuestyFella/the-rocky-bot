@@ -1,0 +1,677 @@
+#!/usr/bin/env python3
+"""Fetch space dashboard data for apollo's monitor: ISS/Tiangong passes, HF propagation, news, launches.
+
+Runs on a systemd timer (rocky-space-export.timer) as an unprivileged user (rocky-space) and
+writes /var/lib/rocky-space/space.json atomically. Each upstream source has its own refresh
+interval; if any source fails or rate-limits, the previous cached section is kept so the kiosk
+keeps working offline or through transient outages.
+
+Satellite passes are computed locally with near-Earth SGP4 (WGS-72) from CelesTrak TLEs, so the
+kiosk counts down live to upcoming passes even without network access for days.
+"""
+import json
+import math
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+
+OUT = os.environ.get("ROCKY_SPACE_OUT", "/var/lib/rocky-space/space.json")
+LAT = float(os.environ.get("ROCKY_SPACE_LAT", "43.5327"))          # University of Guelph, ON
+LON = float(os.environ.get("ROCKY_SPACE_LON", "-80.2262"))
+ALT_M = float(os.environ.get("ROCKY_SPACE_ALT_M", "335"))
+PLACE = os.environ.get("ROCKY_SPACE_PLACE", "Guelph, ON")
+
+USER_AGENT = "rocky-space-export/1.0 (University of Guelph Rocketry Club)"
+TIMEOUT = 15
+
+# Polite refresh intervals (seconds) per upstream source
+TLE_TTL = 6 * 3600        # CelesTrak asks for at most every 2 hours
+SOLAR_TTL = 30 * 60       # N0NBH / hamqsl updates every 1-3 hours
+NEWS_TTL = 15 * 60        # Spaceflight News API v4
+LAUNCH_TTL = 30 * 60      # Launch Library 2 free tier: 15 req/hour per IP
+
+SATELLITES = (
+    {"norad": 25544, "name": "ISS (ZARYA)", "short": "ISS"},
+    {"norad": 48274, "name": "TIANGONG (CSS)", "short": "CSS"},
+)
+
+CELESTRAK_URL = "https://celestrak.org/NORAD/elements/gp.php?CATNR={norad}&FORMAT=TLE"
+SOLAR_URL = "https://www.hamqsl.com/solarxml.php"
+NEWS_URL = "https://api.spaceflightnewsapi.net/v4/articles/?limit=8"
+LAUNCH_URL = "https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=8&mode=list"
+
+PASS_HORIZON_DAYS = 7
+PASS_MIN_MAX_EL = 10.0     # degrees: skip low-horizon passes hidden behind buildings/trees
+PASS_STEP_SEC = 30
+MAX_PASSES = 60
+
+# ---- Near-Earth SGP4 (WGS-72, Hoots & Roehrich 1980 / Vallado 2006) ---------------------
+
+MU = 398600.8
+RE = 6378.135
+XKE = 60.0 / math.sqrt((RE ** 3) / MU)
+J2 = 0.001082616
+J3 = -0.00000253881
+J4 = -0.00000165597
+CK2 = 0.5 * J2
+CK4 = -0.375 * J4
+S_PARAM = 78.0 / RE + 1.0
+QOMS2T = ((120.0 - 78.0) / RE) ** 4
+A3OVK2 = -J3 / CK2
+TWOPI = 2.0 * math.pi
+
+# WGS-84 ellipsoid for observer geodetic -> ECEF
+WGS84_A = 6378.137
+WGS84_F = 1.0 / 298.257223563
+WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def parse_tle_exp(field):
+    """Parse TLE implied-decimal exponent fields like ' 10075-3' or '-11606-4'."""
+    s = field.strip()
+    if not s:
+        return 0.0
+    sign = -1.0 if s[0] == "-" else 1.0
+    if s[0] in "+-":
+        s = s[1:]
+    for i in range(1, len(s)):
+        if s[i] in "+-":
+            return sign * float("0." + s[:i]) * (10.0 ** int(s[i:]))
+    return sign * float(s)
+
+
+def sgp4_init(line1, line2):
+    """Initialize near-Earth SGP4 elements from a two-line element set."""
+    yr = int(line1[18:20])
+    year = 2000 + yr if yr < 57 else 1900 + yr
+    day = float(line1[20:32])
+    epoch_dt = datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=day - 1.0)
+    epoch = epoch_dt.timestamp()
+
+    bstar = parse_tle_exp(line1[53:61])
+    inclo = math.radians(float(line2[8:16]))
+    nodeo = math.radians(float(line2[17:25]))
+    ecco = float("0." + line2[26:33].strip())
+    argpo = math.radians(float(line2[34:42]))
+    mo = math.radians(float(line2[43:51]))
+    no_kozai = float(line2[52:63]) * TWOPI / 1440.0
+
+    a1 = (XKE / no_kozai) ** (2.0 / 3.0)
+    cosio = math.cos(inclo)
+    sinio = math.sin(inclo)
+    theta2 = cosio * cosio
+    x3thm1 = 3.0 * theta2 - 1.0
+    eosq = ecco * ecco
+    betao2 = 1.0 - eosq
+    betao = math.sqrt(betao2)
+    del1 = 1.5 * CK2 * x3thm1 / (a1 * a1 * betao * betao2)
+    ao = a1 * (1.0 - del1 * (1.0 / 3.0 + del1 * (1.0 + 134.0 / 81.0 * del1)))
+    delo = 1.5 * CK2 * x3thm1 / (ao * ao * betao * betao2)
+    xnodp = no_kozai / (1.0 + delo)
+    aodp = ao / (1.0 - delo)
+
+    isimp = (aodp * (1.0 - ecco)) < (220.0 / RE + 1.0)
+    s4, qoms24 = S_PARAM, QOMS2T
+    perige = (aodp * (1.0 - ecco) - 1.0) * RE
+    if perige < 156.0:
+        s4 = perige - 78.0 if perige >= 98.0 else 20.0
+        qoms24 = ((120.0 - s4) / RE) ** 4
+        s4 = s4 / RE + 1.0
+
+    pinvsq = 1.0 / (aodp * aodp * betao2 * betao2)
+    tsi = 1.0 / (aodp - s4)
+    eta = aodp * ecco * tsi
+    etasq = eta * eta
+    eeta = ecco * eta
+    psisq = abs(1.0 - etasq)
+    coef = qoms24 * (tsi ** 4)
+    coef1 = coef / (psisq ** 3.5)
+    c2 = coef1 * xnodp * (
+        aodp * (1.0 + 1.5 * etasq + eeta * (4.0 + etasq))
+        + 0.75 * CK2 * tsi / psisq * x3thm1 * (8.0 + 3.0 * etasq * (8.0 + etasq))
+    )
+    c1 = bstar * c2
+    c3 = coef * tsi * A3OVK2 * xnodp * sinio / ecco if ecco > 1e-4 else 0.0
+    x1mth2 = 1.0 - theta2
+    c4 = 2.0 * xnodp * coef1 * aodp * betao2 * (
+        eta * (2.0 + 0.5 * etasq)
+        + ecco * (0.5 + 2.0 * etasq)
+        - 2.0 * CK2 * tsi / (aodp * psisq) * (
+            -3.0 * x3thm1 * (1.0 - 2.0 * eeta + etasq * (1.5 - 0.5 * eeta))
+            + 0.75 * x1mth2 * (2.0 * etasq - eeta * (1.0 + etasq)) * math.cos(2.0 * argpo)
+        )
+    )
+    c5 = 2.0 * coef1 * aodp * betao2 * (1.0 + 2.75 * (etasq + eeta) + eeta * etasq)
+
+    theta4 = theta2 * theta2
+    temp1 = 3.0 * CK2 * pinvsq * xnodp
+    temp2 = temp1 * CK2 * pinvsq
+    temp3 = 1.25 * CK4 * pinvsq * pinvsq * xnodp
+    xmdot = xnodp + 0.5 * temp1 * betao * x3thm1 + 0.0625 * temp2 * betao * (13.0 - 78.0 * theta2 + 137.0 * theta4)
+    x1m5th = 1.0 - 5.0 * theta2
+    omgdot = (
+        -0.5 * temp1 * x1m5th
+        + 0.0625 * temp2 * (7.0 - 114.0 * theta2 + 395.0 * theta4)
+        + temp3 * (3.0 - 36.0 * theta2 + 49.0 * theta4)
+    )
+    xhdot1 = -temp1 * cosio
+    xnodot = xhdot1 + (0.5 * temp2 * (4.0 - 19.0 * theta2) + 2.0 * temp3 * (3.0 - 7.0 * theta2)) * cosio
+    omgcof = bstar * c3 * math.cos(argpo)
+    xmcof = -(2.0 / 3.0) * coef * bstar / eeta if ecco > 1e-4 else 0.0
+    xnodcf = 3.5 * betao2 * xhdot1 * c1
+    t2cof = 1.5 * c1
+    xlcof = 0.125 * A3OVK2 * sinio * (3.0 + 5.0 * cosio) / (1.0 + cosio if abs(cosio + 1.0) > 1.5e-12 else 1.5e-12)
+    aycof = 0.25 * A3OVK2 * sinio
+    delmo = (1.0 + eta * math.cos(mo)) ** 3
+    sinmo = math.sin(mo)
+    x7thm1 = 7.0 * theta2 - 1.0
+
+    d2 = d3 = d4 = t3cof = t4cof = t5cof = 0.0
+    if not isimp:
+        c1sq = c1 * c1
+        d2 = 4.0 * aodp * tsi * c1sq
+        temp = d2 * tsi * c1 / 3.0
+        d3 = (17.0 * aodp + s4) * temp
+        d4 = 0.5 * temp * aodp * tsi * (221.0 * aodp + 31.0 * s4) * c1
+        t3cof = d2 + 2.0 * c1sq
+        t4cof = 0.25 * (3.0 * d3 + c1 * (12.0 * d2 + 10.0 * c1sq))
+        t5cof = 0.2 * (3.0 * d4 + 12.0 * c1 * d3 + 6.0 * d2 * d2 + 15.0 * c1sq * (2.0 * d2 + c1sq))
+
+    return {
+        "epoch": epoch, "epoch_iso": epoch_dt.isoformat(timespec="seconds"),
+        "bstar": bstar, "inclo": inclo, "nodeo": nodeo, "ecco": ecco, "argpo": argpo, "mo": mo,
+        "cosio": cosio, "sinio": sinio, "x3thm1": x3thm1, "x1mth2": x1mth2, "x7thm1": x7thm1,
+        "xnodp": xnodp, "aodp": aodp, "isimp": isimp, "eta": eta,
+        "c1": c1, "c4": c4, "c5": c5, "xmdot": xmdot, "omgdot": omgdot, "xnodot": xnodot,
+        "omgcof": omgcof, "xmcof": xmcof, "xnodcf": xnodcf, "t2cof": t2cof,
+        "xlcof": xlcof, "aycof": aycof, "delmo": delmo, "sinmo": sinmo,
+        "d2": d2, "d3": d3, "d4": d4, "t3cof": t3cof, "t4cof": t4cof, "t5cof": t5cof,
+    }
+
+
+def sgp4_pos_teme(sat, tsince):
+    """Return satellite TEME position (x, y, z) in km at tsince minutes from TLE epoch."""
+    xmdf = sat["mo"] + sat["xmdot"] * tsince
+    omgadf = sat["argpo"] + sat["omgdot"] * tsince
+    xnoddf = sat["nodeo"] + sat["xnodot"] * tsince
+    omega, xmp = omgadf, xmdf
+    tsq = tsince * tsince
+    xnode = xnoddf + sat["xnodcf"] * tsq
+    tempa = 1.0 - sat["c1"] * tsince
+    tempe = sat["bstar"] * sat["c4"] * tsince
+    templ = sat["t2cof"] * tsq
+    if not sat["isimp"]:
+        delomg = sat["omgcof"] * tsince
+        delm = sat["xmcof"] * (((1.0 + sat["eta"] * math.cos(xmdf)) ** 3) - sat["delmo"]) if sat["ecco"] > 1e-4 else 0.0
+        temp = delomg + delm
+        xmp = xmdf + temp
+        omega = omgadf - temp
+        tcube = tsq * tsince
+        tfour = tsince * tcube
+        tempa -= sat["d2"] * tsq + sat["d3"] * tcube + sat["d4"] * tfour
+        tempe += sat["bstar"] * sat["c5"] * (math.sin(xmp) - sat["sinmo"])
+        templ += sat["t3cof"] * tcube + tfour * (sat["t4cof"] + tsince * sat["t5cof"])
+
+    a = sat["aodp"] * tempa * tempa
+    if a <= 0.9:
+        raise ValueError("satellite orbit decayed")
+    e = max(1e-6, min(0.999, sat["ecco"] - tempe))
+    xl = xmp + omega + xnode + sat["xnodp"] * templ
+    beta = math.sqrt(max(1e-12, 1.0 - e * e))
+
+    axn = e * math.cos(omega)
+    temp = 1.0 / (a * beta * beta)
+    xll = temp * sat["xlcof"] * axn
+    aynl = temp * sat["aycof"]
+    xlt = xl + xll
+    ayn = e * math.sin(omega) + aynl
+
+    capu = (xlt - xnode) % TWOPI
+    epw = capu
+    sinepw = cosepw = 0.0
+    for _ in range(10):
+        sinepw, cosepw = math.sin(epw), math.cos(epw)
+        denom = 1.0 - cosepw * axn - sinepw * ayn
+        delta = (capu - ayn * cosepw + axn * sinepw - epw) / denom
+        if abs(delta) >= 0.95:
+            delta = 0.95 if delta > 0 else -0.95
+        epw += delta
+        if abs(delta) < 1e-12:
+            break
+
+    ecose = axn * cosepw + ayn * sinepw
+    esine = axn * sinepw - ayn * cosepw
+    elsq = axn * axn + ayn * ayn
+    pl = a * (1.0 - elsq)
+    r = a * (1.0 - ecose)
+    temp2 = a / r
+    betal = math.sqrt(max(1e-12, 1.0 - elsq))
+    temp3 = 1.0 / (1.0 + betal)
+    cosu = temp2 * (cosepw - axn + ayn * esine * temp3)
+    sinu = temp2 * (sinepw - ayn - axn * esine * temp3)
+    u = math.atan2(sinu, cosu)
+    sin2u = 2.0 * sinu * cosu
+    cos2u = 2.0 * cosu * cosu - 1.0
+
+    inv_pl = 1.0 / pl
+    temp1 = CK2 * inv_pl
+    temp2 = temp1 * inv_pl
+    rk = r * (1.0 - 1.5 * temp2 * betal * sat["x3thm1"]) + 0.5 * temp1 * sat["x1mth2"] * cos2u
+    uk = u - 0.25 * temp2 * sat["x7thm1"] * sin2u
+    xnodek = xnode + 1.5 * temp2 * sat["cosio"] * sin2u
+    xinck = sat["inclo"] + 1.5 * temp2 * sat["cosio"] * sat["sinio"] * cos2u
+
+    sinuk, cosuk = math.sin(uk), math.cos(uk)
+    sinik, cosik = math.sin(xinck), math.cos(xinck)
+    sinnok, cosnok = math.sin(xnodek), math.cos(xnodek)
+    xmx, xmy = -sinnok * cosik, cosnok * cosik
+    ux = xmx * sinuk + cosnok * cosuk
+    uy = xmy * sinuk + sinnok * cosuk
+    uz = sinik * sinuk
+    return (rk * ux * RE, rk * uy * RE, rk * uz * RE)
+
+
+def gmst_rad(unix_ts):
+    """Greenwich Mean Sidereal Time in radians (IAU 1982)."""
+    jd = unix_ts / 86400.0 + 2440587.5
+    tut1 = (jd - 2451545.0) / 36525.0
+    gmst_sec = (
+        67310.54841
+        + (876600.0 * 3600.0 + 8640184.812866) * tut1
+        + 0.093104 * tut1 * tut1
+        - 6.2e-6 * tut1 * tut1 * tut1
+    )
+    return math.radians((gmst_sec % 86400.0) / 240.0)
+
+
+def observer_ecef(lat_deg, lon_deg, alt_m):
+    """Observer ECEF position (km) and trig terms for ENU conversion."""
+    lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+    slat, clat = math.sin(lat), math.cos(lat)
+    slon, clon = math.sin(lon), math.cos(lon)
+    n = WGS84_A / math.sqrt(1.0 - WGS84_E2 * slat * slat)
+    alt_km = alt_m / 1000.0
+    x = (n + alt_km) * clat * clon
+    y = (n + alt_km) * clat * slon
+    z = (n * (1.0 - WGS84_E2) + alt_km) * slat
+    return (x, y, z, slat, clat, slon, clon)
+
+
+def sun_unit_eci(unix_ts):
+    """Low-precision geocentric unit vector toward the Sun in ECI (~0.01 deg accuracy)."""
+    n = (unix_ts / 86400.0 + 2440587.5) - 2451545.0
+    l_deg = (280.460 + 0.9856474 * n) % 360.0
+    g = math.radians((357.528 + 0.9856003 * n) % 360.0)
+    lam = math.radians(l_deg + 1.915 * math.sin(g) + 0.020 * math.sin(2.0 * g))
+    eps = math.radians(23.439 - 0.0000004 * n)
+    return (math.cos(lam), math.cos(eps) * math.sin(lam), math.sin(eps) * math.sin(lam))
+
+
+def sat_look(sat, obs, unix_ts):
+    """Return (elevation_deg, azimuth_deg, teme_pos_km, gmst) for sat from obs at unix_ts."""
+    pos = sgp4_pos_teme(sat, (unix_ts - sat["epoch"]) / 60.0)
+    gmst = gmst_rad(unix_ts)
+    cg, sg = math.cos(gmst), math.sin(gmst)
+    xe = pos[0] * cg + pos[1] * sg
+    ye = -pos[0] * sg + pos[1] * cg
+    ze = pos[2]
+    ox, oy, oz, slat, clat, slon, clon = obs
+    dx, dy, dz = xe - ox, ye - oy, ze - oz
+    east = -slon * dx + clon * dy
+    north = -slat * clon * dx - slat * slon * dy + clat * dz
+    up = clat * clon * dx + clat * slon * dy + slat * dz
+    rng = math.sqrt(dx * dx + dy * dy + dz * dz)
+    el = math.degrees(math.asin(max(-1.0, min(1.0, up / rng))))
+    az = math.degrees(math.atan2(east, north)) % 360.0
+    return el, az, pos, gmst
+
+
+def is_visible_at(pos_teme, gmst, obs, unix_ts):
+    """True if observer is in civil twilight/night (Sun < -6 deg) and satellite is sunlit."""
+    sx, sy, sz = sun_unit_eci(unix_ts)
+    # Observer Sun elevation
+    cg, sg = math.cos(gmst), math.sin(gmst)
+    sxe = sx * cg + sy * sg
+    sye = -sx * sg + sy * cg
+    sze = sz
+    _, _, _, slat, clat, slon, clon = obs
+    up_sun = clat * clon * sxe + clat * slon * sye + slat * sze
+    sun_el = math.degrees(math.asin(max(-1.0, min(1.0, up_sun))))
+    if sun_el >= -6.0:
+        return False
+    # Cylindrical Earth shadow check
+    proj = pos_teme[0] * sx + pos_teme[1] * sy + pos_teme[2] * sz
+    if proj > 0.0:
+        return True
+    r2 = pos_teme[0] ** 2 + pos_teme[1] ** 2 + pos_teme[2] ** 2
+    perp2 = max(0.0, r2 - proj * proj)
+    return perp2 > RE * RE
+
+
+def _refine_crossing(sat, obs, t_lo, t_hi, rising):
+    for _ in range(12):
+        mid = 0.5 * (t_lo + t_hi)
+        el = sat_look(sat, obs, mid)[0]
+        if (el >= 0.0) == rising:
+            t_hi = mid
+        else:
+            t_lo = mid
+    return 0.5 * (t_lo + t_hi)
+
+
+def _refine_peak(sat, obs, t_lo, t_hi):
+    for _ in range(16):
+        m1 = t_lo + (t_hi - t_lo) / 3.0
+        m2 = t_hi - (t_hi - t_lo) / 3.0
+        if sat_look(sat, obs, m1)[0] < sat_look(sat, obs, m2)[0]:
+            t_lo = m1
+        else:
+            t_hi = m2
+    return 0.5 * (t_lo + t_hi)
+
+
+def predict_passes(tle, lat_deg=LAT, lon_deg=LON, alt_m=ALT_M, now=None,
+                   days=PASS_HORIZON_DAYS, min_max_el=PASS_MIN_MAX_EL, limit=MAX_PASSES):
+    """Predict upcoming passes over (lat_deg, lon_deg, alt_m) from a 2-line TLE pair."""
+    sat = sgp4_init(tle[0], tle[1])
+    obs = observer_ecef(lat_deg, lon_deg, alt_m)
+    now = time.time() if now is None else float(now)
+    t_start = now - 900.0   # start 15 min earlier so a pass already underway is found completely
+    t_end = now + days * 86400.0
+
+    passes = []
+    t = t_start
+    prev_el = sat_look(sat, obs, t)[0]
+    in_pass = prev_el >= 0.0
+    pass_start = t if in_pass else None
+
+    while t < t_end and len(passes) < limit:
+        t_next = t + PASS_STEP_SEC
+        el = sat_look(sat, obs, t_next)[0]
+        if not in_pass and el >= 0.0:
+            pass_start = _refine_crossing(sat, obs, t, t_next, rising=True)
+            in_pass = True
+        elif in_pass and el < 0.0:
+            pass_end = _refine_crossing(sat, obs, t, t_next, rising=False)
+            in_pass = False
+            if pass_end > now:
+                tca = _refine_peak(sat, obs, pass_start, pass_end)
+                max_el, tca_az, _, _ = sat_look(sat, obs, tca)
+                if max_el >= min_max_el:
+                    _, aos_az, _, _ = sat_look(sat, obs, pass_start)
+                    _, los_az, _, _ = sat_look(sat, obs, pass_end)
+                    visible = False
+                    for frac in (0.2, 0.35, 0.5, 0.65, 0.8):
+                        ts = pass_start + (pass_end - pass_start) * frac
+                        sel, _, pos, gmst = sat_look(sat, obs, ts)
+                        if sel >= 10.0 and is_visible_at(pos, gmst, obs, ts):
+                            visible = True
+                            break
+                    passes.append({
+                        "aos": int(round(pass_start)),
+                        "tca": int(round(tca)),
+                        "los": int(round(pass_end)),
+                        "maxEl": int(round(max_el)),
+                        "aosAz": int(round(aos_az)) % 360,
+                        "tcaAz": int(round(tca_az)) % 360,
+                        "losAz": int(round(los_az)) % 360,
+                        "visible": visible,
+                    })
+        t, prev_el = t_next, el
+
+    return sat["epoch_iso"], passes
+
+
+# ---- HTTP & parsers ---------------------------------------------------------------------
+
+def fetch_bytes(url, timeout=TIMEOUT):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def parse_tle_text(text):
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    l1 = next((l for l in lines if l.startswith("1 ") and len(l) >= 68), None)
+    l2 = next((l for l in lines if l.startswith("2 ") and len(l) >= 68), None)
+    if not (l1 and l2):
+        raise ValueError("invalid TLE response")
+    return [l1, l2]
+
+
+def parse_solar_xml(xml_bytes):
+    root = ET.fromstring(xml_bytes)
+    sd = root.find("solardata")
+    if sd is None:
+        raise ValueError("missing <solardata>")
+
+    def field(tag):
+        el = sd.find(tag)
+        return " ".join((el.text or "").split()) if el is not None and el.text else ""
+
+    bands_map = {}
+    band_order = []
+    calc = sd.find("calculatedconditions")
+    if calc is not None:
+        for b in calc.findall("band"):
+            name = (b.attrib.get("name") or "").strip()
+            tod = (b.attrib.get("time") or "").strip().lower()
+            val = " ".join((b.text or "").split())
+            if not name or tod not in ("day", "night"):
+                continue
+            if name not in bands_map:
+                bands_map[name] = {"band": name, "day": "", "night": ""}
+                band_order.append(name)
+            bands_map[name][tod] = val
+
+    vhf = {}
+    calc_vhf = sd.find("calculatedvhfconditions")
+    if calc_vhf is not None:
+        for p in calc_vhf.findall("phenomenon"):
+            pname = (p.attrib.get("name") or "").strip().lower()
+            loc = (p.attrib.get("location") or "").strip().lower()
+            val = " ".join((p.text or "").split())
+            if pname == "vhf-aurora" and loc == "northern_hemi":
+                vhf["aurora"] = val
+            elif pname == "e-skip" and loc == "north_america":
+                vhf["eSkipNA"] = val
+
+    return {
+        "source": "N0NBH",
+        "updated": field("updated"),
+        "sfi": field("solarflux"),
+        "sunspots": field("sunspots"),
+        "aIndex": field("aindex"),
+        "kIndex": field("kindex"),
+        "xray": field("xray"),
+        "solarWind": field("solarwind"),
+        "bz": field("magneticfield"),
+        "geomag": field("geomagfield"),
+        "noise": field("signalnoise"),
+        "aurora": field("aurora"),
+        "auroraLat": field("latdegree"),
+        "muf": field("muf"),
+        "hfBands": [bands_map[k] for k in band_order],
+        "vhf": vhf,
+    }
+
+
+def parse_news_json(data):
+    items = []
+    for art in (data.get("results") or [])[:8]:
+        title = " ".join(str(art.get("title") or "").split())
+        if not title:
+            continue
+        items.append({
+            "title": title,
+            "site": " ".join(str(art.get("news_site") or "").split()),
+            "publishedAt": art.get("published_at") or "",
+        })
+    return items
+
+
+def parse_iso_ts(value):
+    if not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def parse_launches_json(data, now=None):
+    now = time.time() if now is None else float(now)
+    items = []
+    for lch in data.get("results") or []:
+        status = lch.get("status") or {}
+        if status.get("id") in (3, 4, 7):          # already completed (Success / Failure / Partial Failure)
+            continue
+        net = lch.get("net") or ""
+        net_ts = parse_iso_ts(net)
+        if net_ts is None or net_ts < now - 3600:
+            continue
+        name = " ".join(str(lch.get("name") or "").split())
+        if not name:
+            continue
+        items.append({
+            "name": name,
+            "provider": " ".join(str(lch.get("lsp_name") or "").split()),
+            "location": " ".join(str(lch.get("location") or "").split()),
+            "net": net,
+            "netTs": net_ts,
+            "status": " ".join(str(status.get("abbrev") or "").split()),
+        })
+    items.sort(key=lambda x: x["netTs"])
+    return items[:5]
+
+
+# ---- snapshot builder -------------------------------------------------------------------
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def is_fresh(iso_str, ttl, now):
+    ts = parse_iso_ts(iso_str)
+    return ts is not None and (now - ts) < ttl
+
+
+def export_once(out_path=OUT, force=False, now=None, fetcher=fetch_bytes):
+    now = time.time() if now is None else float(now)
+    now_iso = datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds")
+    prev = read_json(out_path)
+    errors = {}
+
+    # 1. Satellites: fetch TLEs when stale, always recompute upcoming passes from TLE
+    prev_sats = {s.get("norad"): s for s in (prev.get("satellites") or []) if isinstance(s, dict)}
+    satellites = []
+    for meta in SATELLITES:
+        norad = meta["norad"]
+        old = prev_sats.get(norad) or {}
+        tle = old.get("tle") if isinstance(old.get("tle"), list) and len(old.get("tle")) == 2 else None
+        fetched_at = old.get("fetchedAt")
+        need_fetch = force or not tle or not is_fresh(fetched_at, TLE_TTL, now)
+        if need_fetch:
+            try:
+                raw = fetcher(CELESTRAK_URL.format(norad=norad)).decode("utf8", errors="replace")
+                tle = parse_tle_text(raw)
+                fetched_at = now_iso
+            except Exception as e:
+                errors[f"tle_{norad}"] = str(e)
+                log(f"TLE fetch failed for {meta['short']} ({norad}): {e}")
+        entry = {
+            "norad": norad,
+            "name": meta["name"],
+            "short": meta["short"],
+            "tle": tle,
+            "tleEpoch": old.get("tleEpoch"),
+            "fetchedAt": fetched_at,
+            "passes": [],
+        }
+        if tle:
+            try:
+                epoch_iso, passes = predict_passes(tle, LAT, LON, ALT_M, now=now)
+                entry["tleEpoch"] = epoch_iso
+                entry["passes"] = passes
+            except Exception as e:
+                errors[f"pass_{norad}"] = str(e)
+                log(f"pass prediction failed for {meta['short']}: {e}")
+                entry["passes"] = old.get("passes") or []
+        satellites.append(entry)
+
+    # 2. Space weather / HF propagation
+    solar = prev.get("solar") if isinstance(prev.get("solar"), dict) else None
+    if force or not solar or not is_fresh(solar.get("fetchedAt"), SOLAR_TTL, now):
+        try:
+            parsed = parse_solar_xml(fetcher(SOLAR_URL))
+            parsed["fetchedAt"] = now_iso
+            solar = parsed
+        except Exception as e:
+            errors["solar"] = str(e)
+            log(f"solar fetch failed: {e}")
+
+    # 3. Space news
+    news = prev.get("news") if isinstance(prev.get("news"), dict) else None
+    if force or not news or not is_fresh(news.get("fetchedAt"), NEWS_TTL, now):
+        try:
+            items = parse_news_json(json.loads(fetcher(NEWS_URL).decode("utf8")))
+            news = {"fetchedAt": now_iso, "items": items}
+        except Exception as e:
+            errors["news"] = str(e)
+            log(f"news fetch failed: {e}")
+
+    # 4. Upcoming launches
+    launches = prev.get("launches") if isinstance(prev.get("launches"), dict) else None
+    if force or not launches or not is_fresh(launches.get("fetchedAt"), LAUNCH_TTL, now):
+        try:
+            items = parse_launches_json(json.loads(fetcher(LAUNCH_URL).decode("utf8")), now=now)
+            launches = {"fetchedAt": now_iso, "items": items}
+        except Exception as e:
+            errors["launches"] = str(e)
+            log(f"launches fetch failed: {e}")
+
+    snap = {
+        "generatedAt": now_iso,
+        "location": {"name": PLACE, "lat": LAT, "lon": LON, "altM": ALT_M},
+        "satellites": satellites,
+        "solar": solar,
+        "news": news,
+        "launches": launches,
+        "errors": errors,
+    }
+    parent = os.path.dirname(os.path.abspath(out_path))
+    os.makedirs(parent, exist_ok=True)
+    tmp = out_path + ".tmp"
+    with open(tmp, "w", encoding="utf8") as f:
+        json.dump(snap, f, ensure_ascii=False, indent=1)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, out_path)
+    return snap
+
+
+def main():
+    force = "--force" in sys.argv
+    snap = export_once(force=force)
+    if "--verbose" in sys.argv or "--once" in sys.argv:
+        pcounts = ", ".join(f"{s['short']}:{len(s['passes'])}" for s in snap["satellites"])
+        sfi = (snap.get("solar") or {}).get("sfi") or "?"
+        n_news = len((snap.get("news") or {}).get("items") or [])
+        n_lch = len((snap.get("launches") or {}).get("items") or [])
+        print(f"exported space snapshot -> {OUT} (passes {pcounts}, SFI {sfi}, news {n_news}, launches {n_lch})")
+
+
+if __name__ == "__main__":
+    main()
