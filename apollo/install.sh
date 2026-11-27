@@ -9,7 +9,10 @@ cd "$(dirname "$0")"
 
 BOT_USER=rockybot
 KIOSK=/usr/local/bin/rocky-board
-KIOSK_BEFORE=7fda643d44946b073a52ac9981d3ab127ca8f4ae6139c57de9451c6c9c3ffb21   # the kiosk that beeped by itself
+KIOSK_KNOWN=(
+    7fda643d44946b073a52ac9981d3ab127ca8f4ae6139c57de9451c6c9c3ffb21   # the kiosk that beeped by itself
+    4ae0442f54eace69230f8031480e7861510e480036f00221aeb368daecb370e4   # apollo-sound kiosk (before space page)
+)
 
 echo "== Packages: nethack, mpv, yt-dlp, espeak-ng"
 if ! pacman -S --needed --noconfirm nethack mpv yt-dlp espeak-ng; then
@@ -28,18 +31,33 @@ systemctl daemon-reload
 systemctl enable apollo-sound
 systemctl restart apollo-sound
 
-echo "== The kiosk stops beeping by itself (apollo-sound plays the !buzz tune)"
+echo "== rocky-space-export (ISS/Tiangong passes, HF propagation, space news, launches)"
+id rocky-space >/dev/null 2>&1 ||
+    useradd --system --home-dir /var/lib/rocky-space --no-create-home --shell /usr/bin/nologin rocky-space
+install -d -o rocky-space -g rocky-space -m 0755 /var/lib/rocky-space
+install -m 0755 rocky-space-export /usr/local/libexec/rocky-space-export
+install -m 0644 rocky-space-export.service /etc/systemd/system/rocky-space-export.service
+install -m 0644 rocky-space-export.timer /etc/systemd/system/rocky-space-export.timer
+systemctl daemon-reload
+systemctl enable --now rocky-space-export.timer
+systemctl start --no-block rocky-space-export.service
+
+echo "== Kiosk board (apollo-sound quiet buzz + Space Dashboard page)"
 current=$(sha256sum "$KIOSK" | cut -d' ' -f1)
+known=0
+for h in "${KIOSK_KNOWN[@]}"; do
+    [ "$current" = "$h" ] && known=1
+done
 if [ "$current" = "$(sha256sum rocky-board | cut -d' ' -f1)" ]; then
-    echo "already done"
-elif [ "$current" = "$KIOSK_BEFORE" ]; then
-    cp -p "$KIOSK" "$KIOSK.bak-apollo-sound"
+    echo "already up to date"
+elif [ "$known" = 1 ]; then
+    cp -p "$KIOSK" "$KIOSK.bak-$(date +%Y%m%d)"
     install -m 0755 rocky-board "$KIOSK"
     systemctl restart rocky-board-kiosk
-    echo "updated; the old one is $KIOSK.bak-apollo-sound"
+    echo "updated; previous copy backed up beside $KIOSK"
 else
     echo "WARNING: $KIOSK was changed by someone else since this was written, so it was left alone." >&2
-    echo "         Until its beep is removed, !buzz plays both its beeps and a tune." >&2
+    echo "         Review diffs and install apollo/rocky-board manually if you want the update." >&2
 fi
 
 echo "== NetHack: everyone shares one pool of ghosts (bones) and one high-score list"

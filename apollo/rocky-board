@@ -57,6 +57,7 @@ import unicodedata
 from datetime import datetime, timezone
 
 SNAPSHOT = os.environ.get("ROCKY_BOARD_FILE", "/var/lib/rocky-board/board.json")
+SPACE_SNAPSHOT = os.environ.get("ROCKY_SPACE_FILE", "/var/lib/rocky-space/space.json")
 # The club room (the rocky bot writes these): who !buzz-ed on Discord, and whether the shop is open
 ROOM_DIR = os.environ.get("ROCKY_ROOM_DIR", "/var/lib/rocky-board")
 BUZZ_FILE, SHOP_FILE = os.path.join(ROOM_DIR, "buzz.json"), os.path.join(ROOM_DIR, "shop.json")
@@ -68,6 +69,7 @@ HOLD_SECONDS = 60          # on the monitor, after someone turns the page by han
 NEXT_KEYS = (b" ", b"\x1b[C", b"\x1b[B", b"\x1b[6~", b"n", b"j", b"l")     # right, down, PgDn
 PREV_KEYS = (b"\x1b[D", b"\x1b[A", b"\x1b[5~", b"p", b"k", b"h")           # left, up, PgUp
 STALE_SECONDS = 120
+SPACE_STALE_SECONDS = 3600
 ONCE = "--once" in sys.argv
 
 # ANSI colours that also work on the plain Linux console (16 colours)
@@ -95,6 +97,12 @@ def clean(text):
     for ch in unicodedata.normalize("NFKD", text):
         if ord(ch) < 256 and unicodedata.category(ch) != "Mn":
             out.append(ch)
+        elif ch in ("\u2018", "\u2019", "\u2032"):
+            out.append("'")
+        elif ch in ("\u201c", "\u201d", "\u2033"):
+            out.append('"')
+        elif ch == "\u2026":
+            out.append("...")
         elif unicodedata.category(ch) in ("Pd",):
             out.append("-")
     return "".join(out).strip()
@@ -233,6 +241,424 @@ def load():
         return None, f"Can't read the board data: {e}"
 
 
+def load_space():
+    """Read the space dashboard snapshot if installed; (None, None) when not set up yet."""
+    paths = [SPACE_SNAPSHOT]
+    if "ROCKY_SPACE_FILE" not in os.environ:
+        fallback = os.path.join(ROOM_DIR, "space.json")
+        if fallback != SPACE_SNAPSHOT:
+            paths.append(fallback)
+    for path in paths:
+        try:
+            with open(path, encoding="utf8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return None, "Space data file is not a JSON object."
+            return data, None
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as e:
+            return None, f"Can't read space data: {e}"
+    return None, None
+
+
+# ---- Space dashboard (ISS/Tiangong passes, HF propagation, news, launches) --------------
+
+COMPASS = ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+PROVIDER_SHORT = {
+    "China Aerospace Science and Technology Corporation": "CASC",
+    "Indian Space Research Organization": "ISRO",
+    "United Launch Alliance": "ULA",
+    "Russian Federal Space Agency (ROSCOSMOS)": "Roscosmos",
+    "Japan Aerospace Exploration Agency": "JAXA",
+    "European Space Agency": "ESA",
+}
+
+
+def compass(deg):
+    try:
+        return COMPASS[int((float(deg) % 360.0 + 11.25) // 22.5) % 16]
+    except (TypeError, ValueError):
+        return "?"
+
+
+def fmt_tminus(seconds):
+    left = max(0, int(seconds))
+    if left >= 86400:
+        d, r = divmod(left, 86400)
+        return f"T-{d}d {r // 3600:02}:{r % 3600 // 60:02}"
+    h, r = divmod(left, 3600)
+    return f"T-{h:02}:{r // 60:02}:{r % 60:02}"
+
+
+def fmt_mmss(seconds):
+    left = max(0, int(seconds))
+    return f"{left // 60:02}:{left % 60:02}"
+
+
+def fmt_pass_when(ts, now, compact_today=False):
+    dt = datetime.fromtimestamp(ts).astimezone()
+    today = datetime.fromtimestamp(now).astimezone().date()
+    if dt.date() == today:
+        return dt.strftime("%H:%M") if compact_today else "Today " + dt.strftime("%H:%M")
+    return dt.strftime("%a %H:%M")
+
+
+def fmt_age(iso_str, now):
+    if not iso_str:
+        return ""
+    try:
+        ts = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return ""
+    age = max(0, int(now - ts))
+    if age < 3600:
+        return f"{max(1, age // 60)}m ago"
+    if age < 86400:
+        return f"{age // 3600}h ago"
+    return f"{age // 86400}d ago"
+
+
+def band_style(cond):
+    c = str(cond or "").strip().lower()
+    if c == "good":
+        return color("green", True)
+    if c == "fair":
+        return color("yellow", True)
+    if c == "poor":
+        return color("red", True)
+    return DIM
+
+
+def num_style(val, warn, bad):
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if n >= bad:
+        return color("red", True)
+    if n >= warn:
+        return color("yellow", True)
+    return color("green", True)
+
+
+def bz_style(val):
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if n <= -5.0:
+        return color("red", True)
+    if n < 0.0:
+        return color("yellow", True)
+    return color("green")
+
+
+def xray_style(val):
+    s = str(val or "").strip().upper()
+    if s.startswith(("M", "X")):
+        return color("red", True)
+    if s.startswith("C"):
+        return color("yellow", True)
+    if s.startswith(("A", "B")):
+        return color("green")
+    return ""
+
+
+def geomag_style(val):
+    s = str(val or "").strip().upper()
+    if "STORM" in s or "MAJOR" in s or "SEVERE" in s:
+        return color("red", True)
+    if "ACTIVE" in s and "INACTIVE" not in s or "UNSETTLED" in s:
+        return color("yellow", True)
+    if s in ("QUIET", "INACTIVE"):
+        return color("green")
+    return ""
+
+
+def launch_status_style(st):
+    s = str(st or "").strip().lower()
+    if s in ("go", "in flight"):
+        return color("green", True)
+    if s in ("tbc",):
+        return color("yellow", True)
+    if s in ("hold",):
+        return color("red", True)
+    return DIM
+
+
+def sat_upcoming(sat, now):
+    passes = [p for p in (sat.get("passes") or []) if isinstance(p, dict) and (p.get("los") or 0) > now]
+    active = next((p for p in passes if (p.get("aos") or 0) <= now <= (p.get("los") or 0)), None)
+    return passes, active
+
+
+def space_summary(space, now):
+    """Single summary line under the Space Dashboard header."""
+    segs = [("", " ")]
+    for sat in (space.get("satellites") or [])[:2]:
+        short = clean(sat.get("short") or sat.get("name") or "SAT")
+        passes, active = sat_upcoming(sat, now)
+        if active:
+            segs.append((color("green", True), f"{short} OVERHEAD! LOS {fmt_mmss(active['los'] - now)}"))
+        elif passes:
+            nxt = passes[0]
+            el = nxt.get("maxEl", "?")
+            vis = " *VIS" if nxt.get("visible") else ""
+            segs.append((color("cyan", True), f"{short} {fmt_tminus(nxt['aos'] - now)}"))
+            segs.append((DIM, f" ({el}\xb0{vis})"))
+        else:
+            segs.append((DIM, f"{short} --"))
+        segs.append(("", "   "))
+    solar = space.get("solar") if isinstance(space.get("solar"), dict) else None
+    if solar:
+        segs += [
+            (DIM, "SFI "), (BOLD, clean(solar.get("sfi") or "?")), ("", "  "),
+            (DIM, "K "), (num_style(solar.get("kIndex"), 3, 5), clean(solar.get("kIndex") or "?")), ("", "  "),
+            (DIM, "X-Ray "), (xray_style(solar.get("xray")), clean(solar.get("xray") or "?")), ("", "  "),
+            (geomag_style(solar.get("geomag")), clean(solar.get("geomag") or "")),
+        ]
+    return segs
+
+
+def pass_block(sat, now):
+    name = clean(sat.get("name") or sat.get("short") or "Satellite")
+    passes, active = sat_upcoming(sat, now)
+    if not passes:
+        return [[(BOLD, name)], [(DIM, "  no upcoming passes cached")]]
+    if active:
+        dur = max(1, (active["los"] - active["aos"]) // 60)
+        hdr = [(color("green", True), f"{name}  OVERHEAD NOW!")]
+        if active.get("visible"):
+            hdr.append((color("yellow", True), "  *VISIBLE"))
+        lines = [
+            hdr,
+            [(color("green", True), "  NOW  "),
+             (BOLD, f"max {active.get('maxEl', '?')}\xb0 "),
+             ("", f"{compass(active.get('aosAz'))}->{compass(active.get('losAz'))}  "),
+             (color("green", True), f"LOS in {fmt_mmss(active['los'] - now)}"),
+             (DIM, f" ({dur}m)")],
+        ]
+        nxt = next((p for p in passes if p is not active), None)
+        if nxt:
+            ndur = max(1, (nxt["los"] - nxt["aos"]) // 60)
+            lines.append([
+                (DIM, "  Next "), (color("cyan"), fmt_tminus(nxt["aos"] - now)),
+                ("", f"  {fmt_pass_when(nxt['aos'], now, True)}  {nxt.get('maxEl', '?')}\xb0 "
+                     f"{compass(nxt.get('aosAz'))}->{compass(nxt.get('losAz'))}  {ndur}m"),
+            ])
+        return lines
+
+    nxt = passes[0]
+    dur = max(1, (nxt["los"] - nxt["aos"]) // 60)
+    left = nxt["aos"] - now
+    t_style = color("red", True) if left < 600 else color("yellow", True) if left < 3600 else color("cyan", True)
+    hdr = [(BOLD, name)]
+    if nxt.get("visible"):
+        hdr.append((color("yellow", True), "  *VISIBLE NEXT"))
+    lines = [
+        hdr,
+        [(DIM, "  Next "), (t_style, f"{fmt_tminus(left):<10}"),
+         ("", f" {fmt_pass_when(nxt['aos'], now, True):<9} "),
+         (BOLD, f"{nxt.get('maxEl', '?'):>2}\xb0 "),
+         ("", f"{compass(nxt.get('aosAz'))}->{compass(nxt.get('losAz'))}"),
+         (DIM, f" {dur}m")],
+    ]
+    if nxt.get("visible"):
+        after = passes[1] if len(passes) > 1 else None
+        if after:
+            adur = max(1, (after["los"] - after["aos"]) // 60)
+            lines.append([
+                (DIM, "  Then "), ("", f"{fmt_pass_when(after['aos'], now):<20} "),
+                ("", f"{after.get('maxEl', '?'):>2}\xb0 {compass(after.get('aosAz'))}->{compass(after.get('losAz'))}"),
+                (DIM, f" {adur}m"),
+                (color("yellow", True), " *VIS") if after.get("visible") else ("", ""),
+            ])
+    else:
+        vis = next((p for p in passes[1:] if p.get("visible")), None)
+        if vis:
+            vdur = max(1, (vis["los"] - vis["aos"]) // 60)
+            lines.append([
+                (DIM, "  Vis  "), (color("green", True), f"{fmt_pass_when(vis['aos'], now):<20} "),
+                ("", f"{vis.get('maxEl', '?'):>2}\xb0 {compass(vis.get('aosAz'))}->{compass(vis.get('losAz'))}"),
+                (DIM, f" {vdur}m"),
+            ])
+        else:
+            lines.append([(DIM, "  Vis  no sunlit night pass in next 7d")])
+    return lines
+
+
+def solar_items(solar, colw):
+    if not solar:
+        return [[[(DIM, "no solar / HF data yet")]]]
+    sfi = clean(solar.get("sfi") or "?")
+    sn = clean(solar.get("sunspots") or "?")
+    a_idx = clean(solar.get("aIndex") or "?")
+    k_idx = clean(solar.get("kIndex") or "?")
+    xray = clean(solar.get("xray") or "?")
+    wind = clean(solar.get("solarWind") or "?")
+    bz = clean(solar.get("bz") or "?")
+    geomag = clean(solar.get("geomag") or "?")
+    noise = clean(solar.get("noise") or "")
+
+    idx_lines = [
+        [(DIM, "SFI "), (BOLD, sfi), ("", "  "),
+         (DIM, "SN "), ("", sn), ("", "  "),
+         (DIM, "A "), (num_style(a_idx, 15, 30), a_idx), ("", "  "),
+         (DIM, "K "), (num_style(k_idx, 3, 5), k_idx), ("", "  "),
+         (DIM, "X-Ray "), (xray_style(xray), xray)],
+        [(DIM, "Wind "), ("", f"{wind} km/s  "),
+         (DIM, "Bz "), (bz_style(bz), bz), ("", "  "),
+         (geomag_style(geomag), geomag)] + ([(DIM, f"  {noise}")] if noise else []),
+    ]
+
+    bands = solar.get("hfBands") or []
+    vhf = solar.get("vhf") if isinstance(solar.get("vhf"), dict) else {}
+    vhf_rows = [
+        ("Aurora", clean(vhf.get("aurora") or "--")),
+        ("E-Skip", clean(vhf.get("eSkipNA") or "--")),
+        ("AurLat", f"{clean(solar.get('auroraLat'))}\xb0 N" if solar.get("auroraLat") else "--"),
+        ("MUF", clean(solar.get("muf") or "--")),
+    ]
+
+    table = [[("", "")]]
+    side_by_side = colw >= 46
+    if side_by_side:
+        table.append([(DIM, f"{'Band':<9}{'Day':<7}{'Night':<8}VHF (N. America)")])
+        for i in range(max(len(bands), len(vhf_rows))):
+            row = []
+            if i < len(bands):
+                b = bands[i]
+                day, night = clean(b.get("day") or "--"), clean(b.get("night") or "--")
+                row += [("", f"{clean(b.get('band') or ''):<9}"),
+                        (band_style(day), f"{day:<7}"),
+                        (band_style(night), f"{night:<8}")]
+            else:
+                row.append(("", " " * 24))
+            if i < len(vhf_rows):
+                lbl, val = vhf_rows[i]
+                vstyle = color("green", True) if "open" in val.lower() else DIM if "closed" in val.lower() else ""
+                row += [(DIM, f"{lbl:<8}"), (vstyle, val)]
+            table.append(row)
+    else:
+        table.append([(DIM, f"{'Band':<10}{'Day':<8}Night")])
+        for b in bands:
+            day, night = clean(b.get("day") or "--"), clean(b.get("night") or "--")
+            table.append([("", f"{clean(b.get('band') or ''):<10}"),
+                          (band_style(day), f"{day:<8}"),
+                          (band_style(night), night)])
+        table.append([(DIM, f"VHF NA: Aurora {vhf_rows[0][1]}  E-Skip {vhf_rows[1][1]}")])
+    return [idx_lines, table]
+
+
+def news_items(news, colw, now, limit):
+    articles = (news or {}).get("items") or []
+    if not articles:
+        return [[[(DIM, "no space news cached yet")]]]
+    out = []
+    for art in articles[:limit]:
+        title = clean(art.get("title") or "")
+        if not title:
+            continue
+        wrapped = wrap(title, max(16, colw), max_lines=2)
+        lines = [[(BOLD, wrapped[0])]] + [[("", more)] for more in wrapped[1:]]
+        meta = [clean(art.get("site") or "")]
+        age = fmt_age(art.get("publishedAt"), now)
+        if age:
+            meta.append(age)
+        meta_txt = "  -  ".join(p for p in meta if p)
+        if meta_txt:
+            lines.append([(DIM, meta_txt)])
+        out.append(lines)
+    return out or [[[(DIM, "no space news cached yet")]]]
+
+
+def launch_items(launches, colw, now, limit):
+    raw = (launches or {}).get("items") or []
+    upcoming = [l for l in raw if isinstance(l, dict) and (l.get("netTs") or 0) > now - 3600]
+    if not upcoming:
+        return [[[(DIM, "no upcoming launches cached")]]]
+    out = []
+    for lch in upcoming[:limit]:
+        left = lch["netTs"] - now
+        if left <= 0:
+            cd_txt, cd_style = "T+00:00   ", color("green", True)
+        else:
+            cd_txt = f"{fmt_tminus(left):<10}"
+            cd_style = color("red", True) if left < 3600 else color("yellow", True) if left < 86400 else color("cyan")
+        st = clean(lch.get("status") or "")
+        name = clean(lch.get("name") or "")
+        line1 = [(cd_style, cd_txt), ("", " ")]
+        if st:
+            line1 += [(launch_status_style(st), f"{st:<4}"), ("", " ")]
+        line1.append((BOLD, name))
+        prov = clean(PROVIDER_SHORT.get(lch.get("provider"), lch.get("provider") or ""))
+        loc = clean(lch.get("location") or "").replace("People's Republic of China", "China")
+        if "," in loc:
+            parts = [p.strip() for p in loc.split(",")]
+            loc = ", ".join(parts[:2])
+        detail = "  -  ".join(p for p in (prov, loc) if p)
+        block = [line1]
+        if detail:
+            block.append([(DIM, "  " + detail)])
+        out.append(block)
+    return out
+
+
+def space_layout(space, cols, colw, rows, now):
+    """Build pages for the Space Dashboard using the same multi-column flow as task boards."""
+    loc = space.get("location") if isinstance(space.get("location"), dict) else {}
+    place = clean(loc.get("name") or "Guelph, ON")
+    sat_hdr = [(color("cyan", True), "STATION PASSES"), (DIM, f"  {place}")]
+    sat_items = [pass_block(s, now) for s in (space.get("satellites") or []) if isinstance(s, dict)]
+    if not sat_items:
+        sat_items = [[[(DIM, "no satellite pass data yet")]]]
+
+    solar = space.get("solar") if isinstance(space.get("solar"), dict) else None
+    upd = clean((solar or {}).get("updated") or "")
+    solar_hdr = [(color("yellow", True), "HF PROPAGATION"), (DIM, f"  {upd}" if upd else "  N0NBH")]
+
+    news_limit = 6 if (ONCE or cols != 2 or rows > 30) else 4
+    launch_limit = 5 if (ONCE or cols != 2 or rows > 30) else 4
+    news_hdr = [(color("green", True), "SPACE NEWS"), (DIM, "  Spaceflight News")]
+    launch_hdr = [(color("magenta", True), "UPCOMING LAUNCHES"), (DIM, "  Launch Library 2")]
+
+    sections = [
+        (sat_hdr, sat_items, False),
+        (solar_hdr, solar_items(solar, colw), False),
+        (news_hdr, news_items(space.get("news"), colw, now, news_limit), cols >= 2),
+        (launch_hdr, launch_items(space.get("launches"), colw, now, launch_limit), cols >= 3),
+    ]
+
+    pages, page, col = [], [[] for _ in range(cols)], 0
+
+    def new_col():
+        nonlocal page, col
+        col += 1
+        if col == cols:
+            pages.append(page)
+            page, col = [[] for _ in range(cols)], 0
+
+    for hdr, items, prefer_new_col in sections:
+        if prefer_new_col and page[col]:
+            new_col()
+        cur = page[col]
+        if cur and len(cur) + 3 > rows:
+            new_col()
+        cur = page[col]
+        if cur:
+            cur.append([("", "")])
+        cur.append(hdr)
+        for item in items:
+            if len(page[col]) + len(item) > rows:
+                new_col()
+                page[col].append(hdr[:1] + [(DIM, "  (cont.)")])
+            page[col].extend(item)
+    if any(page):
+        pages.append(page)
+    return pages or [[[] for _ in range(cols)]]
+
+
 def shown_boards(snap):
     """Boards to page through: main always, the others while they have open tasks."""
     boards = snap.get("boards") or [snap]
@@ -240,50 +666,110 @@ def shown_boards(snap):
             or b["counts"]["ready"] + b["counts"]["progress"] + b["counts"]["waiting"]] or boards[:1]
 
 
-def frame(snap, err, page_no, w, h):
-    now = datetime.now().strftime("%a %d %b  %H:%M")
+def frame(snap, err, page_no, w, h, space=None, space_err=None, now=None):
+    now_ts = time.time() if now is None else float(now)
+    now_str = datetime.fromtimestamp(now_ts).astimezone().strftime("%a %d %b  %H:%M")
     badge = ROOM.badge() if ROOM else None
-    side = ([badge, ("", " ")] if badge else []) + [(REV, " " + now + " ")]
+    side = ([badge, ("", " ")] if badge else []) + [(REV, " " + now_str + " ")]
     header = lambda title: render([(REV + BOLD, fit(" " + clean(title).upper() + " ", max(1, w - sum(width(t) for _, t in side) - 1)))] + side, w)
-    if not snap:
+    if not snap and not space and not space_err:
         lines = [header("Task Board"), render([(color("red", True), err or "")], w)]
         return lines + [" " * w] * (h - len(lines)), 1
-    extra = []
-    countdown = launch_text(snap.get("launch"))
-    if countdown:
-        extra.append(render([(color("red", True), " >> " + countdown)], w))
-    age = time.time() - datetime.fromisoformat(snap["generatedAt"]).timestamp()
-    if age > STALE_SECONDS:
-        extra.append(render([(color("red", True), f" Board data is {int(age // 60)} min old - the exporter may be stopped.")], w))
 
-    rows = h - (3 + len(extra)) - 2
     cols = 1 if ONCE else max(1, min(3, w // 56))
     gap = 3
     colw = (w - gap * (cols - 1)) // cols
-    boards = shown_boards(snap)
-    pages = [(b, p) for b in boards for p in layout(b, cols, colw, max(4, rows))]   # each board gets its own pages
+    countdown = launch_text(snap.get("launch")) if snap else None
+
+    board_extra = []
+    if countdown:
+        board_extra.append(render([(color("red", True), " >> " + countdown)], w))
+    if snap:
+        age = now_ts - datetime.fromisoformat(snap["generatedAt"]).timestamp()
+        if age > STALE_SECONDS:
+            board_extra.append(render([(color("red", True), f" Board data is {int(age // 60)} min old - the exporter may be stopped.")], w))
+
+    space_extra = []
+    if countdown:
+        space_extra.append(render([(color("red", True), " >> " + countdown)], w))
+    if space:
+        try:
+            sage = now_ts - datetime.fromisoformat(space["generatedAt"].replace("Z", "+00:00")).timestamp()
+            if sage > SPACE_STALE_SECONDS:
+                space_extra.append(render([(color("red", True), f" Space data is {int(sage // 60)} min old - rocky-space-export may be stopped.")], w))
+        except (KeyError, ValueError, AttributeError):
+            pass
+
+    pages = []
+    tab_names = []
+    if snap:
+        b_rows = max(4, h - (3 + len(board_extra)) - 2)
+        for b in shown_boards(snap):
+            tab_names.append(clean(b.get("name", "main")))
+            for p in layout(b, cols, colw, b_rows):
+                pages.append(("board", b, p, b_rows))
+    elif err:
+        tab_names.append("main")
+        pages.append(("board_err", None, None, max(4, h - 5)))
+
+    if space:
+        s_rows = max(4, h - (3 + len(space_extra)) - 2)
+        tab_names.append("space")
+        for p in space_layout(space, cols, colw, s_rows, now_ts):
+            pages.append(("space", space, p, s_rows))
+    elif space_err:
+        tab_names.append("space")
+        pages.append(("space_err", None, None, max(4, h - 5)))
+
     page_no %= len(pages)
-    board, page = pages[page_no]
-    c = board["counts"]
-    lines = [header(board["title"]),
-             render([(color("yellow", True), f" {c['progress']} in progress"), ("", "   "),
-                     (color("green", True), f"{c['ready']} ready to claim"), ("", "   "),
-                     (DIM, f"{c['waiting']} locked   {c['done']} done")], w),
-             *extra, " " * w]
-    for r in range(rows):
-        segs = []
-        for ci in range(cols):
-            cell = page[ci][r] if r < len(page[ci]) else [("", "")]
-            segs.append(render(cell, colw))
-        lines.append((" " * gap).join(segs))
-    updated = datetime.fromisoformat(snap["generatedAt"]).astimezone().strftime("%H:%M:%S")
+    kind, obj, page, rows = pages[page_no]
+
+    if kind == "board":
+        c = obj["counts"]
+        lines = [header(obj["title"]),
+                 render([(color("yellow", True), f" {c['progress']} in progress"), ("", "   "),
+                         (color("green", True), f"{c['ready']} ready to claim"), ("", "   "),
+                         (DIM, f"{c['waiting']} locked   {c['done']} done")], w),
+                 *board_extra, " " * w]
+        active_tab = clean(obj.get("name", "main"))
+        updated = datetime.fromisoformat(snap["generatedAt"]).astimezone().strftime("%H:%M:%S")
+        footer = f"page {page_no + 1}/{len(pages)}  -  updated {updated}  -  claim tasks on Discord: Find Work, or !task"
+    elif kind == "board_err":
+        lines = [header("Task Board"), render([(color("red", True), " " + (err or ""))], w)]
+        lines += [" " * w] * max(0, h - len(lines) - 2)
+        active_tab = "main"
+        footer = f"page {page_no + 1}/{len(pages)}"
+    elif kind == "space":
+        loc_name = clean((obj.get("location") or {}).get("name") or "")
+        title = f"Space Dashboard ({loc_name})" if loc_name else "Space Dashboard"
+        lines = [header(title), render(space_summary(obj, now_ts), w), *space_extra, " " * w]
+        active_tab = "space"
+        try:
+            supd = datetime.fromisoformat(obj["generatedAt"].replace("Z", "+00:00")).astimezone().strftime("%H:%M")
+        except (KeyError, ValueError, AttributeError):
+            supd = "?"
+        footer = f"page {page_no + 1}/{len(pages)}  -  space updated {supd}  -  Space/arrows to turn"
+    else:
+        lines = [header("Space Dashboard"), render([(color("red", True), " " + (space_err or ""))], w)]
+        lines += [" " * w] * max(0, h - len(lines) - 2)
+        active_tab = "space"
+        footer = f"page {page_no + 1}/{len(pages)}"
+
+    if page is not None:
+        draw_rows = max((len(c) for c in page), default=0) if ONCE else rows
+        pad = " " * max(0, w - (colw * cols + gap * (cols - 1)))
+        for r in range(draw_rows):
+            segs = []
+            for ci in range(cols):
+                cell = page[ci][r] if r < len(page[ci]) else [("", "")]
+                segs.append(render(cell, colw))
+            lines.append((" " * gap).join(segs) + pad)
+
     tabs = []
-    for b in boards:                                   # which board this is: current one highlighted
-        name = clean(b.get("name", "main"))
-        tabs += [(REV + BOLD, f" {name} ") if b is board else (DIM, f" {name} "), ("", " ")]
-    footer = f"page {page_no + 1}/{len(pages)}  -  updated {updated}  -  claim tasks on Discord: Find Work, or !task"
+    for name in tab_names:
+        tabs += [(REV + BOLD, f" {name} ") if name == active_tab else (DIM, f" {name} "), ("", " ")]
     lines.append(" " * w)
-    lines.append(render([("", " ")] + (tabs + [("", "  ")] if len(boards) > 1 else []) + [(DIM, footer)], w))
+    lines.append(render([("", " ")] + (tabs + [("", "  ")] if len(tab_names) > 1 else []) + [(DIM, footer)], w))
     return (ROOM.overlay(lines[:h], w, h) if ROOM else lines[:h]), len(pages)
 
 
@@ -380,10 +866,11 @@ def split_keys(data):
 def main():
     if ONCE:
         snap, err = load()
+        space, space_err = load_space()
         w, h = shutil.get_terminal_size((100, 40))
         out, page, npages = [], 0, 1
         while page < npages:                           # one page per board here
-            lines, npages = frame(snap, err, page, w, 10_000)
+            lines, npages = frame(snap, err, page, w, 10_000, space=space, space_err=space_err)
             out.append("\n".join(l.rstrip() for l in lines).rstrip())
             page += 1
         try:
@@ -416,9 +903,10 @@ def main():
                 sys.stdout.write("\033[2J")
                 last_size = (w, h)
             snap, err = load()
+            space, space_err = load_space()
             ROOM.poll()
             try:
-                lines, npages = frame(snap, err, page, w, h)
+                lines, npages = frame(snap, err, page, w, h, space=space, space_err=space_err)
             except Exception as e:                     # bad data must never take the board down
                 traceback.print_exc()
                 lines, npages = frame(None, f"Board data couldn't be shown ({type(e).__name__}). Retrying...", 0, w, h)

@@ -1,0 +1,16 @@
+[Unit]
+Description=Fetch ISS/Tiangong passes, HF propagation, space news and launches for apollo's monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=rocky-space
+Group=rocky-space
+ExecStart=/usr/local/libexec/rocky-space-export
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/rocky-space
+TimeoutStartSec=90
