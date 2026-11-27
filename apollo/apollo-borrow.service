@@ -1,0 +1,19 @@
+[Unit]
+Description=Club equipment borrow tracker web app and kiosk backend (apollo-borrow)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=apollo-borrow
+Group=apollo-borrow
+ExecStart=/usr/local/bin/apollo-borrow
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/apollo-borrow
+
+[Install]
+WantedBy=multi-user.target
